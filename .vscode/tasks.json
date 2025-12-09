@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build TimelineEditor (PyInstaller onedir)",
+      "type": "shell",
+			"command": "${workspaceFolder}\\.venv\\Scripts\\pyinstaller.exe",
+      "args": [
+        "--noconsole",
+        "--onedir",
+        "--name",
+        "TimelineEditor",
+				"--icon",
+				"assets\\icon.ico",
+        "--add-data",
+        "timeline;timeline",
+        "--add-data",
+        "dmx_filter_config.json;.",
+        "--hidden-import",
+        "pythonosc.osc_message_builder",
+        "--hidden-import",
+        "pythonosc.osc_message",
+        "main.py"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Write Build Info",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-c",
+				"import os, json, datetime; here=os.path.dirname(__file__); target=os.path.join(here,'timeline','build_info.json'); os.makedirs(os.path.dirname(target), exist_ok=True); info={'build_time': datetime.datetime.utcnow().isoformat()+'Z'}; open(target,'w',encoding='utf-8').write(json.dumps(info, indent=2)); print('Wrote', target)"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Write Build Info",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"tools\\write_build_info.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

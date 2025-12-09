@@ -1,0 +1,46 @@
+name: macOS App Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**/*.py'
+      - 'TimelineEditor_mac.spec'
+      - 'requirements.txt'
+      - '.github/workflows/macos-build.yml'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller mido python-rtmidi
+
+      - name: Build .app with PyInstaller (spec)
+        run: |
+          source .venv/bin/activate
+          pyinstaller TimelineEditor_mac.spec
+
+      - name: Zip app bundle
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent TimelineEditor/TimelineEditor.app TimelineEditor-macOS.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TimelineEditor-macOS
+          path: dist/TimelineEditor-macOS.zip
