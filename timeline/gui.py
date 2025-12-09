@@ -257,6 +257,8 @@ class TimelineEditorGUI:
         self.last_sent_osc = {}
         self._osc_clients = {}
         self._osc_sockets = {}  # cache sockets bound to selected OSC interface per target
+        # Recent OSC target IPs (for quick selection in dialogs)
+        self.recent_osc_ips = []
         # Last-used MIDI test params (persisted)
         self.last_test_midi_note = self.settings.get("last_test_midi_note", 60)
         self.last_test_midi_channel = self.settings.get("last_test_midi_channel", 1)
@@ -1373,10 +1375,15 @@ class TimelineEditorGUI:
         name_var = tk.StringVar(value="OSC")
         tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
 
-        # IP
+        # IP (dropdown with recent targets)
         tk.Label(form, text="IP:", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
         ip_var = tk.StringVar(value="127.0.0.1")
-        tk.Entry(form, textvariable=ip_var, bg="gray40", fg="white", width=30).grid(row=1, column=1, pady=5, padx=10)
+        try:
+            from tkinter import ttk as _ttk
+            ip_combo = _ttk.Combobox(form, textvariable=ip_var, values=getattr(self, 'recent_osc_ips', []), width=28)
+            ip_combo.grid(row=1, column=1, pady=5, padx=10, sticky="w")
+        except Exception:
+            tk.Entry(form, textvariable=ip_var, bg="gray40", fg="white", width=30).grid(row=1, column=1, pady=5, padx=10)
 
         # Port
         tk.Label(form, text="Port:", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
@@ -1429,6 +1436,17 @@ class TimelineEditorGUI:
                     "address": address,
                     "args": args
                 })
+                # Remember IP for future quick selection
+                try:
+                    if not hasattr(self, 'recent_osc_ips'):
+                        self.recent_osc_ips = []
+                    if ip and str(ip) not in self.recent_osc_ips:
+                        self.recent_osc_ips.append(str(ip))
+                        # optional cap to last 20
+                        if len(self.recent_osc_ips) > 20:
+                            self.recent_osc_ips = self.recent_osc_ips[-20:]
+                except Exception:
+                    pass
                 self.osc_markers.sort(key=lambda m: m["t"])
                 self.waveform_cached = False
                 self._update_canvas_view()
@@ -1448,6 +1466,16 @@ class TimelineEditorGUI:
                     return
                 args = parse_args(args_var.get())
                 self._send_osc(ip, port, address, args)
+                # Remember IP on quick send as well
+                try:
+                    if not hasattr(self, 'recent_osc_ips'):
+                        self.recent_osc_ips = []
+                    if ip and str(ip) not in self.recent_osc_ips:
+                        self.recent_osc_ips.append(str(ip))
+                        if len(self.recent_osc_ips) > 20:
+                            self.recent_osc_ips = self.recent_osc_ips[-20:]
+                except Exception:
+                    pass
                 try:
                     if not hasattr(dialog, "_osc_send_status"):
                         dialog._osc_send_status = tk.Label(btns, text="Sent ✓", bg="gray20", fg="#66bb6a", font=("Segoe UI", 9, "bold"))
@@ -1495,10 +1523,15 @@ class TimelineEditorGUI:
         name_var = tk.StringVar(value=str(closest.get("name", "OSC")))
         tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
 
-        # IP
+        # IP (dropdown with recent targets)
         tk.Label(form, text="IP:", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
         ip_var = tk.StringVar(value=str(closest.get("ip", "127.0.0.1")))
-        tk.Entry(form, textvariable=ip_var, bg="gray40", fg="white", width=30).grid(row=1, column=1, pady=5, padx=10)
+        try:
+            from tkinter import ttk as _ttk
+            ip_combo = _ttk.Combobox(form, textvariable=ip_var, values=getattr(self, 'recent_osc_ips', []), width=28)
+            ip_combo.grid(row=1, column=1, pady=5, padx=10, sticky="w")
+        except Exception:
+            tk.Entry(form, textvariable=ip_var, bg="gray40", fg="white", width=30).grid(row=1, column=1, pady=5, padx=10)
 
         # Port
         tk.Label(form, text="Port:", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
@@ -1545,6 +1578,17 @@ class TimelineEditorGUI:
                     return
                 closest["address"] = address
                 closest["args"] = parse_args(args_var.get())
+                # Remember IP for future quick selection
+                try:
+                    ip = closest["ip"]
+                    if not hasattr(self, 'recent_osc_ips'):
+                        self.recent_osc_ips = []
+                    if ip and str(ip) not in self.recent_osc_ips:
+                        self.recent_osc_ips.append(str(ip))
+                        if len(self.recent_osc_ips) > 20:
+                            self.recent_osc_ips = self.recent_osc_ips[-20:]
+                except Exception:
+                    pass
                 self.waveform_cached = False
                 self._update_canvas_view()
                 dialog.destroy()
@@ -1563,6 +1607,16 @@ class TimelineEditorGUI:
                     return
                 args = parse_args(args_var.get())
                 self._send_osc(ip, port, address, args)
+                # Remember IP on quick send
+                try:
+                    if not hasattr(self, 'recent_osc_ips'):
+                        self.recent_osc_ips = []
+                    if ip and str(ip) not in self.recent_osc_ips:
+                        self.recent_osc_ips.append(str(ip))
+                        if len(self.recent_osc_ips) > 20:
+                            self.recent_osc_ips = self.recent_osc_ips[-20:]
+                except Exception:
+                    pass
                 try:
                     if not hasattr(dialog, "_osc_send_status"):
                         dialog._osc_send_status = tk.Label(btns, text="Sent ✓", bg="gray20", fg="#66bb6a", font=("Segoe UI", 9, "bold"))
@@ -3683,6 +3737,13 @@ class TimelineEditorGUI:
                                     "args": args
                                 })
                             self.osc_markers = normalized_osc
+                            # Load recent OSC IPs list
+                            try:
+                                ips = metadata.get("recent_osc_ips", [])
+                                if isinstance(ips, list):
+                                    self.recent_osc_ips = [str(ip) for ip in ips if isinstance(ip, (str, int, float))]
+                            except Exception:
+                                pass
                             self.loop_enabled = metadata.get("loop_enabled", False)
                             self.loop_start = metadata.get("loop_start", 0.0)
                             self.loop_end = metadata.get("loop_end", 0.0)
@@ -3769,6 +3830,8 @@ class TimelineEditorGUI:
                     "markers": self.markers,
                     "midi_markers": self.midi_markers,
                     "osc_markers": self.osc_markers,
+                    # Persist list of recent OSC target IPs for dropdowns
+                    "recent_osc_ips": getattr(self, "recent_osc_ips", []),
                     "loop_enabled": self.loop_enabled,
                     "loop_start": self.loop_start,
                     "loop_end": self.loop_end,
