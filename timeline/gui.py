@@ -635,23 +635,73 @@ class TimelineEditorGUI:
     def _check_audio_dependencies(self):
         """Check if audio libraries are available."""
         try:
-            import mutagen
-            import soundfile
+            import mutagen  # noqa: F401
+            import soundfile  # noqa: F401
             self.has_audio = True
         except Exception:
             self.has_audio = False
-        self.midi_markers = []
-        self.selected_midi_marker = None
-        # Clear loop region
+
+    def _new_timeline(self):
+        """Create a new empty timeline and reset relevant state."""
+        # Core timeline structures
+        self.timeline_data = []
+        self.recorded_events = []
+        self.session_bounds = {}
+        self.selected_frame = None
+        self.selected_session = None
+        self.playhead_pos = 0.0
+        # Looping
         self.loop_enabled = False
         self.loop_start = 0.0
         self.loop_end = 0.0
-        # Clear audio file
+        # Audio state
         self.audio_file = None
         self.audio_data = None
         self.audio_duration = 0.0
-        self.audio_label.config(text="None", foreground="cyan")
-        self._update_canvas_view()
+        try:
+            if getattr(self, "audio_label", None):
+                self.audio_label.config(text="None", foreground="cyan")
+        except Exception:
+            pass
+        # Undo/redo
+        self.undo_stack = []
+        self.redo_stack = []
+        # Dirty state
+        self.is_dirty = False
+        # Markers
+        self.markers = []
+        self.midi_markers = []
+        self.selected_midi_marker = None
+        # Recorder / capture
+        self.recording = False
+        self.is_playing = False
+        try:
+            if hasattr(self, "_stop_audio"):
+                self._stop_audio()
+        except Exception:
+            pass
+        # Refresh views
+        try:
+            if hasattr(self, "_update_canvas_view"):
+                self._update_canvas_view()
+        except Exception:
+            pass
+
+    def _maybe_save_on_exit(self):
+        """Prompt to save changes before exiting, if there are unsaved edits."""
+        try:
+            if getattr(self, 'is_dirty', False):
+                resp = messagebox.askyesnocancel("Save Changes", "You have unsaved changes. Save before exiting?")
+                if resp is None:
+                    return False  # cancel close
+                if resp:
+                    try:
+                        self._save_timeline()
+                    except Exception:
+                        pass
+            return True
+        except Exception:
+            return True
     
     def _save_undo_state(self):
         """Save current state to undo stack."""
@@ -659,7 +709,8 @@ class TimelineEditorGUI:
             "timeline_data": [evt.copy() for evt in self.timeline_data] if self.timeline_data else [],
             "session_names": self.session_names.copy(),
             "markers": [m.copy() for m in self.markers],
-            "midi_markers": [m.copy() for m in self.midi_markers]
+            "midi_markers": [m.copy() for m in self.midi_markers],
+            "osc_markers": [m.copy() for m in getattr(self, "osc_markers", [])]
         }
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo_levels:
@@ -677,7 +728,8 @@ class TimelineEditorGUI:
             "timeline_data": [evt.copy() for evt in self.timeline_data] if self.timeline_data else [],
             "session_names": self.session_names.copy(),
             "markers": [m.copy() for m in self.markers],
-            "midi_markers": [m.copy() for m in self.midi_markers]
+            "midi_markers": [m.copy() for m in self.midi_markers],
+            "osc_markers": [m.copy() for m in getattr(self, "osc_markers", [])]
         }
         self.redo_stack.append(current_state)
         
@@ -686,6 +738,7 @@ class TimelineEditorGUI:
         self.timeline_data = state["timeline_data"]
         self.session_names = state["session_names"]
         self.markers = state["markers"]
+        self.osc_markers = state.get("osc_markers", getattr(self, "osc_markers", []))
         self.waveform_cached = False
         self._update_canvas_view()
     
@@ -699,7 +752,8 @@ class TimelineEditorGUI:
             "timeline_data": [evt.copy() for evt in self.timeline_data] if self.timeline_data else [],
             "session_names": self.session_names.copy(),
             "markers": [m.copy() for m in self.markers],
-            "midi_markers": [m.copy() for m in self.midi_markers]
+            "midi_markers": [m.copy() for m in self.midi_markers],
+            "osc_markers": [m.copy() for m in getattr(self, "osc_markers", [])]
         }
         self.undo_stack.append(current_state)
         
@@ -709,6 +763,7 @@ class TimelineEditorGUI:
         self.session_names = state["session_names"]
         self.markers = state["markers"]
         self.midi_markers = state.get("midi_markers", [])
+        self.osc_markers = state.get("osc_markers", getattr(self, "osc_markers", []))
         self.waveform_cached = False
         self._update_canvas_view()
     
@@ -1442,10 +1497,65 @@ class TimelineEditorGUI:
         form = tk.Frame(dialog, bg="gray20")
         form.pack(pady=10, padx=20, fill=tk.BOTH)
 
-        # Name
+        # Name (dropdown of existing OSC marker names)
         tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
         name_var = tk.StringVar(value="OSC")
-        tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
+        try:
+            from tkinter import ttk as _ttk
+            existing_names = []
+            try:
+                existing_names = sorted({str(m.get("name", "OSC")) for m in getattr(self, 'osc_markers', []) if isinstance(m, dict)})
+            except Exception:
+                existing_names = []
+            name_combo = _ttk.Combobox(form, textvariable=name_var, values=existing_names, width=28)
+            name_combo.grid(row=0, column=1, pady=5, padx=10, sticky="w")
+            def _populate_from_name(event=None):
+                sel = name_var.get().strip()
+                if not sel:
+                    return
+                # Prefer preset with same name if exists
+                preset = None
+                try:
+                    presets = getattr(self, 'osc_presets', {})
+                    if isinstance(presets, dict):
+                        preset = presets.get(sel)
+                except Exception:
+                    preset = None
+                data = None
+                if not preset:
+                    # fallback to last marker with this name
+                    try:
+                        matches = [m for m in getattr(self, 'osc_markers', []) if isinstance(m, dict) and str(m.get('name','')) == sel]
+                        if matches:
+                            data = matches[-1]
+                    except Exception:
+                        data = None
+                # Apply values
+                try:
+                    src = preset or data
+                    if src:
+                        ip_var.set(str(src.get('ip', ip_var.get())))
+                        try:
+                            port_var.set(int(src.get('port', port_var.get())))
+                        except Exception:
+                            pass
+                        addr_var.set(str(src.get('address', addr_var.get())))
+                        # args to text
+                        try:
+                            a = src.get('args', [])
+                            if not isinstance(a, list):
+                                a = [a]
+                            args_var.set(", ".join(str(x) for x in a))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            try:
+                name_combo.bind('<<ComboboxSelected>>', _populate_from_name)
+            except Exception:
+                pass
+        except Exception:
+            tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
 
         # IP (dropdown with recent targets)
         tk.Label(form, text="IP:", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
@@ -1615,10 +1725,65 @@ class TimelineEditorGUI:
         form = tk.Frame(dialog, bg="gray20")
         form.pack(pady=10, padx=20, fill=tk.BOTH)
 
-        # Name
+        # Name (dropdown of existing OSC marker names)
         tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
         name_var = tk.StringVar(value=str(closest.get("name", "OSC")))
-        tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
+        try:
+            from tkinter import ttk as _ttk
+            existing_names = []
+            try:
+                existing_names = sorted({str(m.get("name", "OSC")) for m in getattr(self, 'osc_markers', []) if isinstance(m, dict)})
+            except Exception:
+                existing_names = []
+            name_combo = _ttk.Combobox(form, textvariable=name_var, values=existing_names, width=28)
+            name_combo.grid(row=0, column=1, pady=5, padx=10, sticky="w")
+            def _populate_from_name(event=None):
+                sel = name_var.get().strip()
+                if not sel:
+                    return
+                # Prefer preset with same name if exists
+                preset = None
+                try:
+                    presets = getattr(self, 'osc_presets', {})
+                    if isinstance(presets, dict):
+                        preset = presets.get(sel)
+                except Exception:
+                    preset = None
+                data = None
+                if not preset:
+                    # fallback to last marker with this name
+                    try:
+                        matches = [m for m in getattr(self, 'osc_markers', []) if isinstance(m, dict) and str(m.get('name','')) == sel]
+                        if matches:
+                            data = matches[-1]
+                    except Exception:
+                        data = None
+                # Apply values
+                try:
+                    src = preset or data
+                    if src:
+                        ip_var.set(str(src.get('ip', ip_var.get())))
+                        try:
+                            port_var.set(int(src.get('port', port_var.get())))
+                        except Exception:
+                            pass
+                        addr_var.set(str(src.get('address', addr_var.get())))
+                        # args to text
+                        try:
+                            a = src.get('args', [])
+                            if not isinstance(a, list):
+                                a = [a]
+                            args_var.set(", ".join(str(x) for x in a))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            try:
+                name_combo.bind('<<ComboboxSelected>>', _populate_from_name)
+            except Exception:
+                pass
+        except Exception:
+            tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
 
         # IP (dropdown with recent targets)
         tk.Label(form, text="IP:", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
@@ -2617,6 +2782,11 @@ class TimelineEditorGUI:
     
     def _on_exit(self):
         """Clean up and exit application."""
+        try:
+            if not self._maybe_save_on_exit():
+                return
+        except Exception:
+            pass
         # Close MIDI port if open
         if self.midi_port:
             try:
@@ -2997,6 +3167,12 @@ class TimelineEditorGUI:
         self.root.bind("<Control-y>", lambda e: self._redo())
         # Bind 'm' to add MIDI marker; remove conflicting plain marker hotkey
         self.root.bind("<m>", lambda e: self._add_midi_marker())
+
+        # Prompt to save on window close
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", lambda: self._maybe_save_on_exit() and self.root.destroy())
+        except Exception:
+            pass
         
         playback_menu = tk.Menu(menu_bar, tearoff=0)
         playback_menu.add_command(label="Set Loop In Point", command=self._set_loop_in, accelerator="Ctrl+I")
@@ -3934,7 +4110,8 @@ class TimelineEditorGUI:
         # Use full timeline_data if available, otherwise fall back to recorded_events
         data_to_save = self.timeline_data if self.timeline_data else self.recorded_events
         # Allow saving when there are MIDI markers or markers even if no DMX events
-        if not data_to_save and not self.midi_markers and not self.markers:
+        # Allow saving when there are OSC markers even if no DMX/MIDI/regular markers
+        if not data_to_save and not self.midi_markers and not self.markers and not getattr(self, "osc_markers", []):
             messagebox.showwarning("Warning", "No events or markers to save")
             return
         
@@ -3965,6 +4142,9 @@ class TimelineEditorGUI:
                     "osc_markers": self.osc_markers,
                     # Persist list of recent OSC target IPs for dropdowns
                     "recent_osc_ips": getattr(self, "recent_osc_ips", []),
+                    # Persist presets for OSC and MIDI so dropdowns populate on reopen
+                    "osc_presets": getattr(self, "osc_presets", {}),
+                    "midi_presets": getattr(self, "midi_presets", {}),
                     "loop_enabled": self.loop_enabled,
                     "loop_start": self.loop_start,
                     "loop_end": self.loop_end,
@@ -4821,8 +5001,11 @@ class TimelineEditorGUI:
             for marker in self.markers:
                 marker_x = marker["t"] * self.zoom_level
                 if abs(canvas_x - marker_x) <= 10:
-                    # Jump playhead to marker
-                    self.playhead_pos = marker["t"]
+                    # Select marker without moving playhead
+                    try:
+                        self.selected_marker_time = marker["t"]
+                    except Exception:
+                        pass
                     self.waveform_cached = False
                     self._update_canvas_view()
                     return
@@ -4831,9 +5014,8 @@ class TimelineEditorGUI:
         if hasattr(self, 'midi_marker_boxes') and self.midi_marker_boxes:
             for idx, (x1, y1, x2, y2) in self.midi_marker_boxes.items():
                 if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
-                    # MIDI marker clicked - select it and jump playhead
+                    # MIDI marker clicked - select it (do not move playhead)
                     self.selected_midi_marker = idx
-                    self.playhead_pos = self.midi_markers[idx]["t"]
                     self.selected_frame = None
                     self.selected_session = None
                     # Prepare for dragging horizontally: keep initial offset
@@ -4856,13 +5038,12 @@ class TimelineEditorGUI:
         if hasattr(self, 'osc_marker_boxes') and self.osc_marker_boxes:
             for idx, (x1, y1, x2, y2) in self.osc_marker_boxes.items():
                 if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
-                    # OSC marker clicked - select it and jump playhead
+                    # OSC marker clicked - select it (do not move playhead)
                     self.selected_osc_marker = idx
                     try:
                         marker_t = float(self.osc_markers[idx].get("t", 0.0)) if self.osc_markers[idx] else 0.0
                     except Exception:
                         marker_t = 0.0
-                    self.playhead_pos = marker_t
                     # Prepare for dragging horizontally
                     self._osc_drag_dt = (canvas_x / self.zoom_level) - marker_t
                     self.drag_osc_index = idx
@@ -4927,8 +5108,7 @@ class TimelineEditorGUI:
         if hasattr(self, 'midi_marker_boxes') and self.midi_marker_boxes:
             for idx, (x1, y1, x2, y2) in self.midi_marker_boxes.items():
                 if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
-                    # Set playhead to marker and open editor
-                    self.playhead_pos = self.midi_markers[idx]["t"]
+                    # Open editor without moving playhead
                     self._edit_midi_marker()
                     return
 
@@ -4936,7 +5116,7 @@ class TimelineEditorGUI:
         if hasattr(self, 'osc_marker_boxes') and self.osc_marker_boxes:
             for idx, (x1, y1, x2, y2) in self.osc_marker_boxes.items():
                 if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
-                    self.playhead_pos = float(self.osc_markers[idx].get("t", 0.0))
+                    # Open editor without moving playhead
                     self._edit_osc_marker(idx)
                     return
         
@@ -5303,8 +5483,7 @@ class TimelineEditorGUI:
                 self.selected_midi_marker = self.midi_markers.index(ref)
             except Exception:
                 pass
-            # Keep playhead aligned with dragged marker start for feedback
-            self.playhead_pos = new_t
+            # Keep playhead fixed during marker drag
             self.waveform_cached = False
             self._update_canvas_view()
             return
@@ -5326,7 +5505,7 @@ class TimelineEditorGUI:
                 self.selected_osc_marker = self.osc_markers.index(ref)
             except Exception:
                 pass
-            self.playhead_pos = new_t
+            # Keep playhead fixed during OSC marker drag
             self.waveform_cached = False
             self._update_canvas_view()
             return
@@ -6118,11 +6297,7 @@ class TimelineEditorGUI:
                                     # Sample events for live visualization (only show every 20th event to reduce overhead)
                                     if len(self.recorded_events) % 20 == 0:
                                         if not hasattr(self, 'timeline_data') or self.timeline_data is None:
-                                        "osc_network_interface": getattr(self, "osc_network_interface", self.settings.get("osc_network_interface", "0.0.0.0")),
-                                        # Persist lists/dicts for quick recall
-                                        "recent_osc_ips": getattr(self, "recent_osc_ips", []),
-                                        "osc_presets": getattr(self, "osc_presets", {}),
-                                        "midi_presets": getattr(self, "midi_presets", {})
+                                            self.timeline_data = []
                                         self.timeline_data.append(event)
                                         # Invalidate cache to force redraw and schedule canvas update on main thread
                                         self.waveform_cached = False
