@@ -1262,25 +1262,7 @@ class TimelineEditorGUI:
                         name_var.trace_add('write', _on_name_change)
                     except Exception:
                         tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
-                    if res == 0:
-                        devices.append(f"[{i}] {caps.szPname}")
-                if not devices:
-                    messagebox.showinfo("MIDI Learn", "No Windows MIDI input devices found.")
-                    return
-
-                # Selection dialog
-                sel = tk.Toplevel(dialog)
-                sel.title("Select Windows MIDI Input")
-                sel.geometry("420x260")
-                sel.configure(bg="gray20")
-                            # Save/update preset
-                            try:
-                                nm = name_var.get().strip() or "OSC"
-                                if not hasattr(self, 'osc_presets'):
-                                    self.osc_presets = {}
-                                self.osc_presets[nm] = {"ip": closest["ip"], "port": int(closest["port"]), "address": closest["address"], "args": closest["args"]}
-                            except Exception:
-                                pass
+                    
                 tk.Label(sel, text="Select an input device to learn from:", bg="gray20", fg="white").pack(pady=8)
                 in_var = tk.StringVar(value=devices[0])
                 list_frame = tk.Frame(sel, bg="gray20")
