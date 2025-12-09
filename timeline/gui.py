@@ -259,6 +259,9 @@ class TimelineEditorGUI:
         self._osc_sockets = {}  # cache sockets bound to selected OSC interface per target
         # Recent OSC target IPs (for quick selection in dialogs)
         self.recent_osc_ips = []
+        # Presets keyed by name for quick recall
+        self.osc_presets = {}
+        self.midi_presets = {}
         # Last-used MIDI test params (persisted)
         self.last_test_midi_note = self.settings.get("last_test_midi_note", 60)
         self.last_test_midi_channel = self.settings.get("last_test_midi_channel", 1)
@@ -636,9 +639,29 @@ class TimelineEditorGUI:
             import soundfile
             self.has_audio = True
         except:
-            self.has_audio = False
-
-    def _new_timeline(self):
+        # Name (preset selection)
+        tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        name_var = tk.StringVar(value="OSC")
+        try:
+            from tkinter import ttk as _ttk
+            name_combo = _ttk.Combobox(form, textvariable=name_var, values=sorted(list(getattr(self, 'osc_presets', {}).keys())), width=28)
+            name_combo.grid(row=0, column=1, pady=5, padx=10, sticky="w")
+            def _on_name_change(*_):
+                nm = name_var.get()
+                preset = getattr(self, 'osc_presets', {}).get(nm)
+                if isinstance(preset, dict):
+                    try:
+                        ip_var.set(str(preset.get('ip', ip_var.get())))
+                        port_var.set(int(preset.get('port', port_var.get())))
+                        addr_var.set(str(preset.get('address', addr_var.get())))
+                        args_var.set(
+                            ", ".join(str(a) for a in (preset.get('args', [])))
+                        )
+                    except Exception:
+                        pass
+            name_var.trace_add('write', _on_name_change)
+        except Exception:
+            tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
         """Reset timeline and recording state to start a new project."""
         self.is_playing = False
         self.recording = False
@@ -649,6 +672,13 @@ class TimelineEditorGUI:
         self.selected_session = None
         self.session_bounds = {}
         self.playhead_pos = 0.0
+                # Save/update preset
+                try:
+                    if not hasattr(self, 'osc_presets'):
+                        self.osc_presets = {}
+                    self.osc_presets[name] = {"ip": ip, "port": int(port), "address": address, "args": args}
+                except Exception:
+                    pass
         self.waveform_cached = False
         # Clear capture sessions
         self.capture_session = 0
@@ -870,35 +900,58 @@ class TimelineEditorGUI:
         form_frame.pack(pady=10, padx=20, fill=tk.BOTH)
         
         # Note
-        tk.Label(form_frame, text="MIDI Note (0-127):", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        # Name (preset selection)
+        tk.Label(form_frame, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        name_var = tk.StringVar(value="MIDI")
+        try:
+            from tkinter import ttk as _ttk
+            name_combo = _ttk.Combobox(form_frame, textvariable=name_var, values=sorted(list(getattr(self, 'midi_presets', {}).keys())), width=22)
+            name_combo.grid(row=0, column=1, pady=5, padx=10)
+            def _on_name_change(*_):
+                nm = name_var.get()
+                preset = getattr(self, 'midi_presets', {}).get(nm)
+                if isinstance(preset, dict):
+                    try:
+                        note_var.set(int(preset.get('note', 60)))
+                        velocity_var.set(int(preset.get('velocity', 100)))
+                        channel_var.set(int(preset.get('channel', 1)))
+                        duration_var.set(float(preset.get('duration', 0.1)))
+                        label_var.set(str(preset.get('label', '')))
+                    except Exception:
+                        pass
+            name_var.trace_add('write', _on_name_change)
+        except Exception:
+            tk.Entry(form_frame, textvariable=name_var, bg="gray40", fg="white", width=25).grid(row=0, column=1, pady=5, padx=10)
+
+        tk.Label(form_frame, text="MIDI Note (0-127):", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
         note_var = tk.IntVar(value=60)  # Middle C
         note_spin = tk.Spinbox(form_frame, from_=0, to=127, textvariable=note_var, bg="gray40", fg="white", width=15)
-        note_spin.grid(row=0, column=1, pady=5, padx=10)
+        note_spin.grid(row=1, column=1, pady=5, padx=10)
         
         # Velocity
-        tk.Label(form_frame, text="Velocity (0-127):", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Velocity (0-127):", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
         velocity_var = tk.IntVar(value=100)
         velocity_spin = tk.Spinbox(form_frame, from_=0, to=127, textvariable=velocity_var, bg="gray40", fg="white", width=15)
-        velocity_spin.grid(row=1, column=1, pady=5, padx=10)
+        velocity_spin.grid(row=2, column=1, pady=5, padx=10)
         
         # Channel
-        tk.Label(form_frame, text="MIDI Channel (1-16):", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="MIDI Channel (1-16):", bg="gray20", fg="white").grid(row=3, column=0, sticky="w", pady=5)
         channel_var = tk.IntVar(value=1)
         channel_spin = tk.Spinbox(form_frame, from_=1, to=16, textvariable=channel_var, bg="gray40", fg="white", width=15)
-        channel_spin.grid(row=2, column=1, pady=5, padx=10)
+        channel_spin.grid(row=3, column=1, pady=5, padx=10)
         
         # Duration
-        tk.Label(form_frame, text="Duration (seconds):", bg="gray20", fg="white").grid(row=3, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Duration (seconds):", bg="gray20", fg="white").grid(row=4, column=0, sticky="w", pady=5)
         duration_var = tk.DoubleVar(value=0.1)
         duration_spin = tk.Spinbox(form_frame, from_=0.01, to=10.0, increment=0.1, textvariable=duration_var, 
                                    bg="gray40", fg="white", width=15)
-        duration_spin.grid(row=3, column=1, pady=5, padx=10)
+        duration_spin.grid(row=4, column=1, pady=5, padx=10)
         
         # Label (optional)
-        tk.Label(form_frame, text="Label (optional):", bg="gray20", fg="white").grid(row=4, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Label (optional):", bg="gray20", fg="white").grid(row=5, column=0, sticky="w", pady=5)
         label_var = tk.StringVar(value="")
         label_entry = tk.Entry(form_frame, textvariable=label_var, bg="gray40", fg="white", width=25)
-        label_entry.grid(row=4, column=1, pady=5, padx=10)
+        label_entry.grid(row=5, column=1, pady=5, padx=10)
         
         # Learn MIDI button: detect incoming MIDI and set fields
         def learn_midi():
@@ -1066,10 +1119,19 @@ class TimelineEditorGUI:
                 channel = channel_var.get()
                 duration = duration_var.get()
                 label = label_var.get().strip()
+                # Save/update preset
+                try:
+                    nm = name_var.get().strip() or "MIDI"
+                    if not hasattr(self, 'midi_presets'):
+                        self.midi_presets = {}
+                    self.midi_presets[nm] = {"note": int(note), "velocity": int(velocity), "channel": int(channel), "duration": float(duration), "label": label}
+                except Exception:
+                    pass
                 
                 self._save_undo_state()
                 midi_marker = {
                     "t": self.playhead_pos,
+                    "name": name_var.get().strip() or "MIDI",
                     "note": note,
                     "velocity": velocity,
                     "channel": channel,
@@ -1095,6 +1157,14 @@ class TimelineEditorGUI:
                 v = int(velocity_var.get())
                 ch = int(channel_var.get())
                 dur = float(duration_var.get())
+                # Save/update preset on test
+                try:
+                    nm = name_var.get().strip() or "MIDI"
+                    if not hasattr(self, 'midi_presets'):
+                        self.midi_presets = {}
+                    self.midi_presets[nm] = {"note": int(n), "velocity": int(v), "channel": int(ch), "duration": float(dur), "label": label_var.get().strip()}
+                except Exception:
+                    pass
                 # Route through standard sender (uses Windows backend here)
                 self._send_midi_note(n, v, ch, max(0.01, dur))
                 try:
@@ -1137,40 +1207,71 @@ class TimelineEditorGUI:
         form_frame = tk.Frame(dialog, bg="gray20")
         form_frame.pack(pady=10, padx=20, fill=tk.BOTH)
         
+        # Name (preset selection)
+        tk.Label(form_frame, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        name_var = tk.StringVar(value=str(closest_marker.get("name", "MIDI")))
+        try:
+            from tkinter import ttk as _ttk
+            name_combo = _ttk.Combobox(form_frame, textvariable=name_var, values=sorted(list(getattr(self, 'midi_presets', {}).keys())), width=22)
+            name_combo.grid(row=0, column=1, pady=5, padx=10)
+            def _on_name_change(*_):
+                nm = name_var.get()
+                preset = getattr(self, 'midi_presets', {}).get(nm)
+                if isinstance(preset, dict):
+                    try:
+                        note_var.set(int(preset.get('note', note_var.get())))
+                        velocity_var.set(int(preset.get('velocity', velocity_var.get())))
+                        channel_var.set(int(preset.get('channel', channel_var.get())))
+                        duration_var.set(float(preset.get('duration', duration_var.get())))
+                        label_var.set(str(preset.get('label', '')))
+                    except Exception:
+                        pass
+            name_var.trace_add('write', _on_name_change)
+        except Exception:
+            tk.Entry(form_frame, textvariable=name_var, bg="gray40", fg="white", width=25).grid(row=0, column=1, pady=5, padx=10)
+
         # Note
-        tk.Label(form_frame, text="MIDI Note (0-127):", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="MIDI Note (0-127):", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
         note_var = tk.IntVar(value=closest_marker.get("note", 60))
         note_spin = tk.Spinbox(form_frame, from_=0, to=127, textvariable=note_var, bg="gray40", fg="white", width=15)
-        note_spin.grid(row=0, column=1, pady=5, padx=10)
+        note_spin.grid(row=1, column=1, pady=5, padx=10)
         
         # Velocity
-        tk.Label(form_frame, text="Velocity (0-127):", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Velocity (0-127):", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
         velocity_var = tk.IntVar(value=closest_marker.get("velocity", 100))
         velocity_spin = tk.Spinbox(form_frame, from_=0, to=127, textvariable=velocity_var, bg="gray40", fg="white", width=15)
-        velocity_spin.grid(row=1, column=1, pady=5, padx=10)
+        velocity_spin.grid(row=2, column=1, pady=5, padx=10)
         
         # Channel
-        tk.Label(form_frame, text="MIDI Channel (1-16):", bg="gray20", fg="white").grid(row=2, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="MIDI Channel (1-16):", bg="gray20", fg="white").grid(row=3, column=0, sticky="w", pady=5)
         channel_var = tk.IntVar(value=closest_marker.get("channel", 1))
         channel_spin = tk.Spinbox(form_frame, from_=1, to=16, textvariable=channel_var, bg="gray40", fg="white", width=15)
-        channel_spin.grid(row=2, column=1, pady=5, padx=10)
+        channel_spin.grid(row=3, column=1, pady=5, padx=10)
         
         # Duration
-        tk.Label(form_frame, text="Duration (seconds):", bg="gray20", fg="white").grid(row=3, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Duration (seconds):", bg="gray20", fg="white").grid(row=4, column=0, sticky="w", pady=5)
         duration_var = tk.DoubleVar(value=closest_marker.get("duration", 0.1))
         duration_spin = tk.Spinbox(form_frame, from_=0.01, to=10.0, increment=0.1, textvariable=duration_var, 
                                    bg="gray40", fg="white", width=15)
-        duration_spin.grid(row=3, column=1, pady=5, padx=10)
+        duration_spin.grid(row=4, column=1, pady=5, padx=10)
         
         # Label
-        tk.Label(form_frame, text="Label (optional):", bg="gray20", fg="white").grid(row=4, column=0, sticky="w", pady=5)
+        tk.Label(form_frame, text="Label (optional):", bg="gray20", fg="white").grid(row=5, column=0, sticky="w", pady=5)
         label_var = tk.StringVar(value=closest_marker.get("label", ""))
         label_entry = tk.Entry(form_frame, textvariable=label_var, bg="gray40", fg="white", width=25)
-        label_entry.grid(row=4, column=1, pady=5, padx=10)
+        label_entry.grid(row=5, column=1, pady=5, padx=10)
         
         # Learn MIDI button: detect incoming MIDI and set fields (same as Add dialog)
         def learn_midi():
             try:
+                # Save/update preset on send
+                try:
+                    nm = name_var.get().strip() or "OSC"
+                    if not hasattr(self, 'osc_presets'):
+                        self.osc_presets = {}
+                    self.osc_presets[nm] = {"ip": ip, "port": int(port), "address": address, "args": args}
+                except Exception:
+                    pass
                 if not HAS_WINDOWS_MIDI:
                     messagebox.showinfo("MIDI Learn", "Windows MIDI not available on this system.")
                     return
@@ -1186,9 +1287,29 @@ class TimelineEditorGUI:
                         ("szPname", ctypes.c_wchar * 32),
                         ("dwSupport", ctypes.wintypes.DWORD),
                     ]
-                for i in range(num_devs):
-                    caps = MIDIINCAPS()
-                    res = winmm.midiInGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps))
+                    # Name (preset selection)
+                    tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+                    name_var = tk.StringVar(value=str(closest.get("name", "OSC")))
+                    try:
+                        from tkinter import ttk as _ttk
+                        name_combo = _ttk.Combobox(form, textvariable=name_var, values=sorted(list(getattr(self, 'osc_presets', {}).keys())), width=28)
+                        name_combo.grid(row=0, column=1, pady=5, padx=10, sticky="w")
+                        def _on_name_change(*_):
+                            nm = name_var.get()
+                            preset = getattr(self, 'osc_presets', {}).get(nm)
+                            if isinstance(preset, dict):
+                                try:
+                                    ip_var.set(str(preset.get('ip', ip_var.get())))
+                                    port_var.set(int(preset.get('port', port_var.get())))
+                                    addr_var.set(str(preset.get('address', addr_var.get())))
+                                    args_var.set(
+                                        ", ".join(str(a) for a in (preset.get('args', [])))
+                                    )
+                                except Exception:
+                                    pass
+                        name_var.trace_add('write', _on_name_change)
+                    except Exception:
+                        tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
                     if res == 0:
                         devices.append(f"[{i}] {caps.szPname}")
                 if not devices:
@@ -1200,6 +1321,14 @@ class TimelineEditorGUI:
                 sel.title("Select Windows MIDI Input")
                 sel.geometry("420x260")
                 sel.configure(bg="gray20")
+                            # Save/update preset
+                            try:
+                                nm = name_var.get().strip() or "OSC"
+                                if not hasattr(self, 'osc_presets'):
+                                    self.osc_presets = {}
+                                self.osc_presets[nm] = {"ip": closest["ip"], "port": int(closest["port"]), "address": closest["address"], "args": closest["args"]}
+                            except Exception:
+                                pass
                 tk.Label(sel, text="Select an input device to learn from:", bg="gray20", fg="white").pack(pady=8)
                 in_var = tk.StringVar(value=devices[0])
                 list_frame = tk.Frame(sel, bg="gray20")
@@ -1320,11 +1449,20 @@ class TimelineEditorGUI:
         def save_changes():
             try:
                 self._save_undo_state()
+                closest_marker["name"] = name_var.get().strip() or "MIDI"
                 closest_marker["note"] = note_var.get()
                 closest_marker["velocity"] = velocity_var.get()
                 closest_marker["channel"] = channel_var.get()
                 closest_marker["duration"] = duration_var.get()
                 closest_marker["label"] = label_var.get().strip()
+                # Save/update preset
+                try:
+                    nm = name_var.get().strip() or "MIDI"
+                    if not hasattr(self, 'midi_presets'):
+                        self.midi_presets = {}
+                    self.midi_presets[nm] = {"note": int(closest_marker["note"]), "velocity": int(closest_marker["velocity"]), "channel": int(closest_marker["channel"]), "duration": float(closest_marker["duration"]), "label": closest_marker["label"]}
+                except Exception:
+                    pass
                 self.waveform_cached = False
                 self._update_canvas_view()
                 dialog.destroy()
@@ -1403,15 +1541,40 @@ class TimelineEditorGUI:
         def parse_args(text):
             vals = []
             for item in [s.strip() for s in text.split(',') if s.strip()]:
-                # try int, then float, else string
+                # Optional type prefixes: i:, f:, s:, b:
+                if ':' in item and item[:2] in ('i:', 'f:', 's:', 'b:'):
+                    typ, val = item[:1], item[2:]
+                    if item.startswith('i:'):
+                        try:
+                            vals.append(int(val))
+                            continue
+                        except Exception:
+                            vals.append(val)
+                            continue
+                    if item.startswith('f:'):
+                        try:
+                            vals.append(float(val))
+                            continue
+                        except Exception:
+                            vals.append(val)
+                            continue
+                    if item.startswith('s:'):
+                        vals.append(val)
+                        continue
+                    if item.startswith('b:'):
+                        try:
+                            vals.append(val.encode('utf-8'))
+                            continue
+                        except Exception:
+                            vals.append(val)
+                            continue
+                # Autodetect: int → float → string
                 try:
-                    vals.append(int(item))
-                    continue
+                    vals.append(int(item)); continue
                 except Exception:
                     pass
                 try:
-                    vals.append(float(item))
-                    continue
+                    vals.append(float(item)); continue
                 except Exception:
                     pass
                 vals.append(item)
@@ -1556,6 +1719,29 @@ class TimelineEditorGUI:
         def parse_args(text):
             vals = []
             for item in [s.strip() for s in text.split(',') if s.strip()]:
+                # Optional type prefixes: i:, f:, s:, b:
+                if ':' in item and item[:2] in ('i:', 'f:', 's:', 'b:'):
+                    if item.startswith('i:'):
+                        val = item[2:]
+                        try:
+                            vals.append(int(val)); continue
+                        except Exception:
+                            vals.append(val); continue
+                    if item.startswith('f:'):
+                        val = item[2:]
+                        try:
+                            vals.append(float(val)); continue
+                        except Exception:
+                            vals.append(val); continue
+                    if item.startswith('s:'):
+                        vals.append(item[2:]); continue
+                    if item.startswith('b:'):
+                        val = item[2:]
+                        try:
+                            vals.append(val.encode('utf-8')); continue
+                        except Exception:
+                            vals.append(val); continue
+                # Autodetect: int → float → string
                 try:
                     vals.append(int(item)); continue
                 except Exception:
@@ -3742,6 +3928,19 @@ class TimelineEditorGUI:
                                 ips = metadata.get("recent_osc_ips", [])
                                 if isinstance(ips, list):
                                     self.recent_osc_ips = [str(ip) for ip in ips if isinstance(ip, (str, int, float))]
+                            except Exception:
+                                pass
+                            # Load presets
+                            try:
+                                p_osc = metadata.get("osc_presets", {})
+                                if isinstance(p_osc, dict):
+                                    self.osc_presets = p_osc
+                            except Exception:
+                                pass
+                            try:
+                                p_midi = metadata.get("midi_presets", {})
+                                if isinstance(p_midi, dict):
+                                    self.midi_presets = p_midi
                             except Exception:
                                 pass
                             self.loop_enabled = metadata.get("loop_enabled", False)
@@ -5985,7 +6184,11 @@ class TimelineEditorGUI:
                                     # Sample events for live visualization (only show every 20th event to reduce overhead)
                                     if len(self.recorded_events) % 20 == 0:
                                         if not hasattr(self, 'timeline_data') or self.timeline_data is None:
-                                            self.timeline_data = []
+                                        "osc_network_interface": getattr(self, "osc_network_interface", self.settings.get("osc_network_interface", "0.0.0.0")),
+                                        # Persist lists/dicts for quick recall
+                                        "recent_osc_ips": getattr(self, "recent_osc_ips", []),
+                                        "osc_presets": getattr(self, "osc_presets", {}),
+                                        "midi_presets": getattr(self, "midi_presets", {})
                                         self.timeline_data.append(event)
                                         # Invalidate cache to force redraw and schedule canvas update on main thread
                                         self.waveform_cached = False
