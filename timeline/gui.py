@@ -1251,7 +1251,9 @@ class TimelineEditorGUI:
     def _add_smpte_marker(self):
         """Add a SMPTE marker at the current playhead time."""
         try:
-            m = {"t": float(self.playhead_pos), "name": "SMPTE", "duration": 5.0}
+            # Default to 30s when no audio/timeline to give room on new projects
+            default_t = 30.0 if (not self.audio_file and not self.timeline_data) else float(self.playhead_pos)
+            m = {"t": float(default_t), "name": "SMPTE", "duration": 30.0}
             self._save_undo_state()
             self.smpte_markers.append(m)
             self.smpte_markers.sort(key=lambda x: x.get("t", 0.0))
@@ -3099,6 +3101,27 @@ class TimelineEditorGUI:
                 ttk.Radiobutton(right_frame, text=port_name, variable=midi_var, value=port_name).pack(anchor="w", pady=3, padx=10)
             ttk.Radiobutton(right_frame, text="Disable MIDI Output", variable=midi_var, value="None").pack(anchor="w", pady=(10, 3), padx=10)
         
+        # SMPTE / LTC settings row
+        smpte_frame = ttk.LabelFrame(main_frame, text="SMPTE / LTC", padding=10)
+        smpte_frame.grid(row=1, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
+
+        # Enable SMPTE toggle and placeholders for input device and frame rate
+        self.smpte_enabled = bool(self.settings.get("smpte_enabled", False))
+        smpte_enable_var = tk.BooleanVar(value=self.smpte_enabled)
+        ttk.Checkbutton(smpte_frame, text="Enable SMPTE when no audio file is loaded", variable=smpte_enable_var).grid(row=0, column=0, sticky="w", pady=4)
+
+        ttk.Label(smpte_frame, text="Input Device (placeholder):").grid(row=1, column=0, sticky="w", pady=4)
+        smpte_input_var = tk.StringVar(value=str(self.settings.get("smpte_input_device", "Default")))
+        smpte_input_combo = ttk.Combobox(smpte_frame, textvariable=smpte_input_var, values=["Default"], width=28)
+        smpte_input_combo.grid(row=1, column=1, sticky="w")
+
+        ttk.Label(smpte_frame, text="Frame Rate (optional override):").grid(row=2, column=0, sticky="w", pady=4)
+        smpte_fps_var = tk.StringVar(value=str(self.settings.get("smpte_frame_rate", "Auto")))
+        smpte_fps_combo = ttk.Combobox(smpte_frame, textvariable=smpte_fps_var, values=["Auto","24","25","29.97 DF","30"], width=12)
+        smpte_fps_combo.grid(row=2, column=1, sticky="w")
+
+        ttk.Label(smpte_frame, text="Press 'S' to add SMPTE markers. LTC input wiring will be added.", foreground="gray").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6,0))
+
         # Bottom buttons frame
         button_frame = ttk.Frame(settings_win, padding=10)
         button_frame.pack(fill=tk.X)
@@ -3200,10 +3223,10 @@ class TimelineEditorGUI:
             self.osc_network_interface = osc_net_var.get()
             audio_val = audio_var.get()
             self.audio_device = None if audio_val == "None" else int(audio_val)
-            
+
             midi_val = midi_var.get()
             self.midi_output_port = None if midi_val == "None" else midi_val
-            
+
             # Close existing MIDI port if open
             if self.midi_port:
                 try:
@@ -3224,6 +3247,11 @@ class TimelineEditorGUI:
             self.settings["osc_network_interface"] = self.osc_network_interface
             self.settings["audio_device"] = self.audio_device
             self.settings["midi_output_port"] = self.midi_output_port
+            # Save SMPTE settings
+            self.smpte_enabled = bool(smpte_enable_var.get())
+            self.settings["smpte_enabled"] = self.smpte_enabled
+            self.settings["smpte_input_device"] = smpte_input_var.get()
+            self.settings["smpte_frame_rate"] = smpte_fps_var.get()
             self._save_settings()
             # Restart DMX monitor to apply new interface
             self._restart_dmx_monitor()
@@ -4173,6 +4201,30 @@ class TimelineEditorGUI:
                                     "args": args
                                 })
                             self.osc_markers = normalized_osc
+                            # Load SMPTE markers
+                            try:
+                                raw_smpte = metadata.get("smpte_markers", [])
+                                normalized_smpte = []
+                                for m in raw_smpte:
+                                    if not isinstance(m, dict):
+                                        continue
+                                    try:
+                                        t = float(m.get("t", 0.0))
+                                    except Exception:
+                                        t = 0.0
+                                    name = str(m.get("name", "SMPTE"))
+                                    try:
+                                        duration = float(m.get("duration", 30.0))
+                                    except Exception:
+                                        duration = 30.0
+                                    normalized_smpte.append({
+                                        "t": t,
+                                        "name": name,
+                                        "duration": duration
+                                    })
+                                self.smpte_markers = normalized_smpte
+                            except Exception:
+                                self.smpte_markers = []
                             # Load recent OSC IPs list
                             try:
                                 ips = metadata.get("recent_osc_ips", [])
@@ -4220,6 +4272,11 @@ class TimelineEditorGUI:
                                         self.session_priority_var.set(self.session_priority_enabled)
                                 except Exception:
                                     pass
+                            # Load SMPTE settings
+                            try:
+                                self.smpte_enabled = bool(metadata.get("smpte_enabled", self.settings.get("smpte_enabled", False)))
+                                self.settings["smpte_input_device"] = metadata.get("smpte_input_device", self.settings.get("smpte_input_device", "Default"))
+                                self.settings["smpte_frame_rate"] = metadata.get("smpte_frame_rate", self.settings.get("smpte_frame_rate", "Auto"))
                             except Exception:
                                 pass
                     except:
@@ -4285,6 +4342,7 @@ class TimelineEditorGUI:
                     "markers": self.markers,
                     "midi_markers": self.midi_markers,
                     "osc_markers": self.osc_markers,
+                    "smpte_markers": getattr(self, "smpte_markers", []),
                     # Persist list of recent OSC target IPs for dropdowns
                     "recent_osc_ips": getattr(self, "recent_osc_ips", []),
                     # Persist presets for OSC and MIDI so dropdowns populate on reopen
@@ -4298,7 +4356,11 @@ class TimelineEditorGUI:
                     # Ensure JSON-serializable keys (convert to strings)
                     "session_priorities": {str(k): int(v) for k, v in getattr(self, "session_priorities", {}).items()},
                     # Persist OSC network interface selection
-                    "osc_network_interface": getattr(self, "osc_network_interface", self.settings.get("osc_network_interface", "0.0.0.0"))
+                    "osc_network_interface": getattr(self, "osc_network_interface", self.settings.get("osc_network_interface", "0.0.0.0")),
+                    # Persist SMPTE settings
+                    "smpte_enabled": bool(getattr(self, "smpte_enabled", self.settings.get("smpte_enabled", False))),
+                    "smpte_input_device": str(self.settings.get("smpte_input_device", "Default")),
+                    "smpte_frame_rate": str(self.settings.get("smpte_frame_rate", "Auto"))
                 }
                 
                 metadata_path = file_path + ".meta"
@@ -4972,9 +5034,17 @@ class TimelineEditorGUI:
         playhead_x_after = self.playhead_pos * self.zoom_level
         
         # Adjust scroll to keep playhead centered in view
+        # Include SMPTE markers in max_time so a new timeline without audio can still render
+        smpte_max = 0.0
+        try:
+            if getattr(self, 'smpte_markers', []):
+                smpte_max = max((m.get('t', 0.0) + float(m.get('duration', 0.0)) for m in self.smpte_markers), default=0.0)
+        except Exception:
+            smpte_max = 0.0
         max_time = max(
             self.audio_duration if self.audio_data else 0,
-            max((evt.get("t", 0) for evt in self.timeline_data), default=0) if self.timeline_data else 0
+            max((evt.get("t", 0) for evt in self.timeline_data), default=0) if self.timeline_data else 0,
+            smpte_max
         )
         total_width = int(max_time * self.zoom_level) + 100 if max_time > 0 else canvas_width
         
@@ -5987,7 +6057,7 @@ class TimelineEditorGUI:
         )
         
         if max_time == 0:
-            self.canvas.create_text(50, 20, text="No audio or timeline loaded", fill="white", anchor="nw")
+            self.canvas.create_text(50, 20, text="No content loaded (add markers or audio)", fill="white", anchor="nw")
             return
         
         # Auto-scroll to follow playhead when playing/recording
