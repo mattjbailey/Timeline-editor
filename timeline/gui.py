@@ -1438,6 +1438,29 @@ class TimelineEditorGUI:
 
         btns = tk.Frame(dialog, bg="gray20")
         btns.pack(pady=10)
+        def send_current_osc():
+            try:
+                ip = ip_var.get().strip()
+                port = int(port_var.get())
+                address = addr_var.get().strip()
+                if not address.startswith('/'):
+                    messagebox.showerror("OSC", "Address must start with '/'")
+                    return
+                args = parse_args(args_var.get())
+                self._send_osc(ip, port, address, args)
+                try:
+                    if not hasattr(dialog, "_osc_send_status"):
+                        dialog._osc_send_status = tk.Label(btns, text="Sent ✓", bg="gray20", fg="#66bb6a", font=("Segoe UI", 9, "bold"))
+                        dialog._osc_send_status.pack(side=tk.LEFT, padx=8)
+                    else:
+                        dialog._osc_send_status.configure(text="Sent ✓")
+                    # Auto-hide after 2 seconds
+                    dialog.after(2000, lambda: dialog._osc_send_status.configure(text=""))
+                except Exception:
+                    pass
+            except Exception as e:
+                messagebox.showerror("OSC", f"Send failed: {e}")
+        tk.Button(btns, text="Send", command=send_current_osc, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(btns, text="Add", command=save_osc_marker, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(btns, text="Cancel", command=dialog.destroy, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
 
@@ -1530,6 +1553,28 @@ class TimelineEditorGUI:
 
         btns = tk.Frame(dialog, bg="gray20")
         btns.pack(pady=10)
+        def send_current_osc():
+            try:
+                ip = ip_var.get().strip()
+                port = int(port_var.get())
+                address = addr_var.get().strip()
+                if not address.startswith('/'):
+                    messagebox.showerror("OSC", "Address must start with '/'")
+                    return
+                args = parse_args(args_var.get())
+                self._send_osc(ip, port, address, args)
+                try:
+                    if not hasattr(dialog, "_osc_send_status"):
+                        dialog._osc_send_status = tk.Label(btns, text="Sent ✓", bg="gray20", fg="#66bb6a", font=("Segoe UI", 9, "bold"))
+                        dialog._osc_send_status.pack(side=tk.LEFT, padx=8)
+                    else:
+                        dialog._osc_send_status.configure(text="Sent ✓")
+                    dialog.after(2000, lambda: dialog._osc_send_status.configure(text=""))
+                except Exception:
+                    pass
+            except Exception as e:
+                messagebox.showerror("OSC", f"Send failed: {e}")
+        tk.Button(btns, text="Send", command=send_current_osc, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(btns, text="Save", command=save_changes, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(btns, text="Cancel", command=dialog.destroy, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
     
@@ -2232,25 +2277,53 @@ class TimelineEditorGUI:
             self.root.after(0, lambda: self._flash_osc_activity(msg_text))
         except Exception:
             pass
-        # Attempt to send via socket bound to selected interface; fallback to python-osc client
+        # Attempt to send via socket bound to selected interface; build OSC datagram manually if python-osc is missing
+        def _encode_osc(address_str: str, values: list) -> bytes:
+            # Minimal OSC encoder: address + type tag string + arguments, all 4-byte padded
+            def _pad(b: bytes) -> bytes:
+                pad = (4 - (len(b) % 4)) % 4
+                return b + (b"\x00" * pad)
+            # address
+            addr_b = _pad(address_str.encode('ascii') + b"\x00")
+            # build typetags and args
+            tags = ','
+            arg_bytes = b''
+            import struct
+            for v in values:
+                if isinstance(v, bool):
+                    # no native bool in OSC, map to int
+                    tags += 'i'; arg_bytes += struct.pack('>i', 1 if v else 0)
+                elif isinstance(v, int):
+                    tags += 'i'; arg_bytes += struct.pack('>i', int(v))
+                elif isinstance(v, float):
+                    tags += 'f'; arg_bytes += struct.pack('>f', float(v))
+                elif isinstance(v, (bytes, bytearray)):
+                    tags += 'b'; arg_bytes += _pad(bytes(v))
+                else:
+                    s = str(v)
+                    tags += 's'; arg_bytes += _pad(s.encode('utf-8') + b"\x00")
+            tag_b = _pad(tags.encode('ascii') + b"\x00")
+            return addr_b + tag_b + arg_bytes
         try:
-            from pythonosc.osc_message_builder import OscMessageBuilder
-            from pythonosc.osc_message import OscMessage
-            b = OscMessageBuilder(address=address)
-            for a in payload:
-                b.add_arg(a)
-            msg: OscMessage = b.build()
-            data = msg.dgram
             sock = self._get_osc_socket(ip, port)
             if sock:
-                sock.sendto(data, (ip, int(port)))
-                debug_log(f"DEBUG: OSC sent via socket {self.osc_network_interface} -> {ip}:{port} {address} {payload}")
-                return
-        except Exception as e:
-            try:
-                debug_log(f"ERROR: OSC socket path failed: {e}")
-            except Exception:
-                pass
+                try:
+                    # Try python-osc for robustness; fall back to manual encoding
+                    try:
+                        from pythonosc.osc_message_builder import OscMessageBuilder
+                        b = OscMessageBuilder(address=address)
+                        for a in payload:
+                            b.add_arg(a)
+                        data = b.build().dgram
+                    except Exception:
+                        data = _encode_osc(address, payload)
+                    sock.sendto(data, (ip, int(port)))
+                    debug_log(f"DEBUG: OSC sent via socket {getattr(self,'osc_network_interface','0.0.0.0')} -> {ip}:{port} {address} {payload}")
+                    return
+                except Exception as e:
+                    debug_log(f"ERROR: OSC socket send failed: {e}")
+        except Exception:
+            pass
         # Fallback to python-osc client
         try:
             cli = self._get_osc_client(ip, port)
