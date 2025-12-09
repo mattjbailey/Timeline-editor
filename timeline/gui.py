@@ -151,6 +151,8 @@ class TimelineEditorGUI:
         self.audio_duration = 0.0
         self.play_obj = None
         self.waveform_cached = False  # Cache flag to avoid redrawing waveform
+        # Dirty state for save-on-exit prompt
+        self.is_dirty = False
         
         # Art-Net frame selection
         self.selected_frame = None
@@ -562,7 +564,8 @@ class TimelineEditorGUI:
             def do_flash():
                 try:
                     if hasattr(self, "monitor_midi_light") and self.monitor_midi_light:
-                        self.monitor_midi_light.config(bg="#b2ff59")
+                        # Flash lighter purple to match MIDI marker fill
+                        self.monitor_midi_light.config(bg="mediumpurple")
                     if hasattr(self, "_last_midi_note_text") and hasattr(self, "monitor_midi_last_label"):
                         self.monitor_midi_last_label.config(text=self._last_midi_note_text)
                 except Exception:
@@ -697,6 +700,9 @@ class TimelineEditorGUI:
                 if resp:
                     try:
                         self._save_timeline()
+                        # If still dirty, saving was canceled/failed; abort exit
+                        if getattr(self, 'is_dirty', False):
+                            return False
                     except Exception:
                         pass
             return True
@@ -717,6 +723,11 @@ class TimelineEditorGUI:
             self.undo_stack.pop(0)
         # Clear redo stack when new action is taken
         self.redo_stack = []
+        # Mark timeline as dirty on any change that records undo state
+        try:
+            self.is_dirty = True
+        except Exception:
+            pass
     
     def _undo(self):
         """Undo last action."""
@@ -764,6 +775,52 @@ class TimelineEditorGUI:
         self.markers = state["markers"]
         self.midi_markers = state.get("midi_markers", [])
         self.osc_markers = state.get("osc_markers", getattr(self, "osc_markers", []))
+        self.waveform_cached = False
+        self._update_canvas_view()
+
+    def _playhead_nudge_amount(self):
+        """Compute a sensible nudge step in seconds based on zoom."""
+        try:
+            # Aim for ~20px per nudge; convert to time by zoom_level (px/sec)
+            px = 20
+            zl = float(self.zoom_level) if self.zoom_level else 100.0
+            step = max(0.01, px / zl)
+            return step
+        except Exception:
+            return 0.1
+
+    def _nudge_playhead(self, dt: float):
+        """Move playhead by dt seconds, clamped to timeline/audio bounds."""
+        try:
+            new_t = float(self.playhead_pos) + float(dt)
+        except Exception:
+            new_t = self.playhead_pos
+        # Clamp between 0 and max timeline length
+        max_t = 0.0
+        try:
+            if self.timeline_data:
+                # Use last event time if available
+                max_t = max(max_t, max((evt.get("t", 0.0) for evt in self.timeline_data), default=0.0))
+        except Exception:
+            pass
+        try:
+            if self.midi_markers:
+                max_t = max(max_t, max((m.get("t", 0.0) for m in self.midi_markers), default=0.0))
+        except Exception:
+            pass
+        try:
+            if self.osc_markers:
+                max_t = max(max_t, max((m.get("t", 0.0) for m in self.osc_markers), default=0.0))
+        except Exception:
+            pass
+        try:
+            if self.audio_duration and self.audio_duration > 0:
+                max_t = max(max_t, float(self.audio_duration))
+        except Exception:
+            pass
+        if max_t <= 0:
+            max_t = 1e6  # effectively unbounded
+        self.playhead_pos = max(0.0, min(max_t, new_t))
         self.waveform_cached = False
         self._update_canvas_view()
     
@@ -3167,10 +3224,21 @@ class TimelineEditorGUI:
         self.root.bind("<Control-y>", lambda e: self._redo())
         # Bind 'm' to add MIDI marker; remove conflicting plain marker hotkey
         self.root.bind("<m>", lambda e: self._add_midi_marker())
-
-        # Prompt to save on window close
+        # Bind 'f' to zoom fit the timeline
         try:
-            self.root.protocol("WM_DELETE_WINDOW", lambda: self._maybe_save_on_exit() and self.root.destroy())
+            self.root.bind("<f>", lambda e: self._zoom_fit())
+        except Exception:
+            pass
+        # Bind arrow keys to nudge playhead
+        try:
+            self.root.bind("<Left>", lambda e: self._nudge_playhead(-self._playhead_nudge_amount()))
+            self.root.bind("<Right>", lambda e: self._nudge_playhead(self._playhead_nudge_amount()))
+        except Exception:
+            pass
+
+        # Prompt to save on window close via unified exit handler
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self._on_exit)
         except Exception:
             pass
         
@@ -3865,6 +3933,11 @@ class TimelineEditorGUI:
                 # Zoom to fit the entire audio file in view
                 self.waveform_cached = False
                 self._zoom_fit()
+                # Mark timeline as dirty after adding/replacing audio
+                try:
+                    self.is_dirty = True
+                except Exception:
+                    pass
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load audio: {e}")
     
@@ -4096,6 +4169,11 @@ class TimelineEditorGUI:
                     self._zoom_fit()
                 except Exception:
                     pass
+                # Opening a file resets dirty state
+                try:
+                    self.is_dirty = False
+                except Exception:
+                    pass
             except Exception as e:
                 try:
                     debug_log(f"ERROR: File open failed for {file_path}: {e}")
@@ -4161,6 +4239,11 @@ class TimelineEditorGUI:
                     json.dump(metadata, f, indent=2)
                 try:
                     debug_log(f"META SAVE: session_priority_enabled={metadata.get('session_priority_enabled', False)} sessions={len(metadata.get('session_priorities', {}))}")
+                except Exception:
+                    pass
+                # Mark clean on successful save
+                try:
+                    self.is_dirty = False
                 except Exception:
                     pass
                 
@@ -4631,6 +4714,41 @@ class TimelineEditorGUI:
             cur_text = self._format_time(self.playhead_pos)
             entry = tk.Entry(self.monitor_timecode_container if hasattr(self, "monitor_timecode_container") else self.monitor_frame,
                               bg="#ffffff", fg="#000000", font=("Segoe UI", 18, "bold"), justify="center")
+            # Allow digits, ':' for HH:MM:SS and a single '.' for fractions
+            def _validate_timecode(newval: str):
+                try:
+                    if newval == "":
+                        return True
+                    # Only digits, colon and dot
+                    for ch in newval:
+                        if not (ch.isdigit() or ch in ":."):
+                            return False
+                    # At most two colons (HH:MM:SS) and one dot
+                    if newval.count(':') > 2:
+                        return False
+                    if newval.count('.') > 1:
+                        return False
+                    # Try parse: either float seconds or HH:MM:SS[.mmm]
+                    try:
+                        float(newval)
+                    except Exception:
+                        parts = newval.split(':')
+                        if not (1 <= len(parts) <= 3):
+                            return False
+                        parts = [p.strip() for p in parts]
+                        while len(parts) < 3:
+                            parts.insert(0, '0')
+                        h, m, s = parts
+                        # h,m must be ints; s can be float
+                        int(h); int(m); float(s)
+                    return True
+                except Exception:
+                    return False
+            try:
+                vcmd = (self.root.register(_validate_timecode), '%P')
+                entry.config(validate='key', validatecommand=vcmd)
+            except Exception:
+                pass
             entry.insert(0, cur_text)
             # Place entry where the label is
             try:
@@ -4825,9 +4943,11 @@ class TimelineEditorGUI:
                 ("Toggle Loop", "L"),
                 ("Add MIDI Marker", "M"),
                 ("Add OSC Marker", "o"),
+                ("Nudge Playhead", "Left / Right"),
                 ("Delete Selected", "Delete"),
                 ("Zoom In", "+ / Keypad +"),
                 ("Zoom Out", "- / Keypad -"),
+                ("Zoom Fit Timeline", "F"),
                 ("Edit Timecode", "Double-click timecode; Enter/Escape to apply/cancel"),
             ]
 
@@ -5128,6 +5248,11 @@ class TimelineEditorGUI:
                     self.selected_session = s_id
                     self.selected_frame = None
                     self._update_canvas_view()
+                    # Open rename dialog on session double-click
+                    try:
+                        self._rename_session()
+                    except Exception:
+                        pass
                     return
         
         # Check if double-clicking on a frame
@@ -5597,6 +5722,11 @@ class TimelineEditorGUI:
                     self.selected_midi_marker = self.midi_markers.index(ref)
             except Exception:
                 pass
+            # Mark dirty on position change
+            try:
+                self.is_dirty = True
+            except Exception:
+                pass
             # Clear drag state
             self.drag_midi_index = None
             self._drag_midi_ref = None
@@ -5619,6 +5749,11 @@ class TimelineEditorGUI:
                 self.osc_markers.sort(key=lambda m: m.get("t", 0.0))
                 if ref in self.osc_markers:
                     self.selected_osc_marker = self.osc_markers.index(ref)
+            except Exception:
+                pass
+            # Mark dirty on position change
+            try:
+                self.is_dirty = True
             except Exception:
                 pass
             self.drag_osc_index = None
@@ -5793,7 +5928,7 @@ class TimelineEditorGUI:
             waveform_height = min(100, canvas_height // 3) if self.audio_data else 0
             waveform_y_top = 30
             waveform_y_bottom = waveform_y_top + waveform_height
-            base_y = waveform_y_bottom + 50  # increased gap below waveform to make room for session names
+            base_y = waveform_y_bottom + 80  # increased gap below waveform to prevent overlap with session labels
             row_spacing = 24
             session_gap = 24
             
@@ -6020,6 +6155,16 @@ class TimelineEditorGUI:
                     label_y += (10 if below else -10)
                     y1 = label_y - est_h
                     y2 = label_y
+                # Clamp label inside lane vertically
+                try:
+                    min_cy = osc_section_top + 6 + est_h/2
+                    max_cy = osc_section_bottom - 6 - est_h/2
+                    if label_y < min_cy:
+                        label_y = min_cy
+                    elif label_y > max_cy:
+                        label_y = max_cy
+                except Exception:
+                    pass
                 self.canvas.create_text(label_x, label_y, text=info,
                                        fill="white", anchor="w", font=("Arial", 7, "bold"))
                 placed_osc_labels.append((label_x, y1, x2, y2))
@@ -6043,7 +6188,7 @@ class TimelineEditorGUI:
             self.canvas.create_rectangle(0, midi_section_top, max_x, midi_section_bottom,
                                         fill="gray15", outline="purple", width=2)
             self.canvas.create_text(left_padding, midi_section_top - 22, text="MIDI Markers", 
-                                   fill="purple", anchor="nw", font=("Arial", 9, "bold"))
+                                   fill="mediumpurple", anchor="nw", font=("Arial", 9, "bold"))
             
             # Track MIDI marker bounds for click selection
             self.midi_marker_boxes = {}
@@ -6109,8 +6254,18 @@ class TimelineEditorGUI:
                     label_y += (10 if below else -10)
                     y1 = label_y - est_h
                     y2 = label_y
+                # Clamp label inside lane vertically
+                try:
+                    min_cy = midi_section_top + 6 + est_h/2
+                    max_cy = midi_section_bottom - 6 - est_h/2
+                    if label_y < min_cy:
+                        label_y = min_cy
+                    elif label_y > max_cy:
+                        label_y = max_cy
+                except Exception:
+                    pass
                 self.canvas.create_text(label_x, label_y, text=info_text,
-                                       fill="white", anchor="w", font=("Arial", 7, "bold"))
+                                       fill="mediumpurple", anchor="w", font=("Arial", 7, "bold"))
                 placed_midi_labels.append((label_x, y1, x2, y2))
                 
                 # Store bounds for click detection
