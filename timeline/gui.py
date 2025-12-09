@@ -638,56 +638,8 @@ class TimelineEditorGUI:
             import mutagen
             import soundfile
             self.has_audio = True
-        except:
-        # Name (preset selection)
-        tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
-        name_var = tk.StringVar(value="OSC")
-        try:
-            from tkinter import ttk as _ttk
-            name_combo = _ttk.Combobox(form, textvariable=name_var, values=sorted(list(getattr(self, 'osc_presets', {}).keys())), width=28)
-            name_combo.grid(row=0, column=1, pady=5, padx=10, sticky="w")
-            def _on_name_change(*_):
-                nm = name_var.get()
-                preset = getattr(self, 'osc_presets', {}).get(nm)
-                if isinstance(preset, dict):
-                    try:
-                        ip_var.set(str(preset.get('ip', ip_var.get())))
-                        port_var.set(int(preset.get('port', port_var.get())))
-                        addr_var.set(str(preset.get('address', addr_var.get())))
-                        args_var.set(
-                            ", ".join(str(a) for a in (preset.get('args', [])))
-                        )
-                    except Exception:
-                        pass
-            name_var.trace_add('write', _on_name_change)
         except Exception:
-            tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=30).grid(row=0, column=1, pady=5, padx=10)
-        """Reset timeline and recording state to start a new project."""
-        self.is_playing = False
-        self.recording = False
-        self._stop_audio()
-        self.timeline_data = []
-        self.recorded_events = []
-        self.selected_frame = None
-        self.selected_session = None
-        self.session_bounds = {}
-        self.playhead_pos = 0.0
-                # Save/update preset
-                try:
-                    if not hasattr(self, 'osc_presets'):
-                        self.osc_presets = {}
-                    self.osc_presets[name] = {"ip": ip, "port": int(port), "address": address, "args": args}
-                except Exception:
-                    pass
-        self.waveform_cached = False
-        # Clear capture sessions
-        self.capture_session = 0
-        self.current_session_id = 0
-        # Clear undo/redo, session names, and markers
-        self.undo_stack = []
-        self.redo_stack = []
-        self.session_names = {}
-        self.markers = []
+            self.has_audio = False
         self.midi_markers = []
         self.selected_midi_marker = None
         # Clear loop region
