@@ -199,6 +199,9 @@ class TimelineEditorGUI:
         self.midi_markers = []  # [{"t": time, "note": int, "velocity": int, "channel": int, "duration": float}]
         # OSC markers
         self.osc_markers = []  # [{"t": time, "name": str, "ip": str, "port": int, "address": str, "args": list}]
+        # SMPTE markers
+        self.smpte_markers = []  # [{"t": time, "name": str, "duration": float}]
+        self.selected_smpte_marker = None
         # Selection/drag state for OSC
         self.selected_osc_marker = None
         self.drag_osc_index = None
@@ -340,6 +343,8 @@ class TimelineEditorGUI:
         # Bind keyboard shortcut for adding OSC marker ('o')
         try:
             self.root.bind("<KeyPress-o>", lambda e: self._add_osc_marker())
+            # Bind keyboard shortcut for adding SMPTE marker ('s')
+            self.root.bind("<KeyPress-s>", lambda e: self._add_smpte_marker())
         except Exception:
             pass
         # Restore window geometry before sash placement
@@ -1242,6 +1247,68 @@ class TimelineEditorGUI:
         tk.Button(button_frame, text="Test MIDI", command=test_current_midi, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Learn MIDI", command=learn_midi, bg="gray40", fg="white", width=12, takefocus=0).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Cancel", command=dialog.destroy, bg="gray40", fg="white", width=10, takefocus=0).pack(side=tk.LEFT, padx=5)
+
+    def _add_smpte_marker(self):
+        """Add a SMPTE marker at the current playhead time."""
+        try:
+            m = {"t": float(self.playhead_pos), "name": "SMPTE", "duration": 5.0}
+            self._save_undo_state()
+            self.smpte_markers.append(m)
+            self.smpte_markers.sort(key=lambda x: x.get("t", 0.0))
+            self.waveform_cached = False
+            self._update_canvas_view()
+        except Exception as e:
+            try:
+                messagebox.showerror("SMPTE", f"Failed to add marker: {e}")
+            except Exception:
+                pass
+
+    def _edit_smpte_marker(self, idx):
+        """Edit a SMPTE marker by index (from click)."""
+        if not (0 <= idx < len(self.smpte_markers)):
+            return
+        sm = self.smpte_markers[idx]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit SMPTE Marker")
+        dialog.geometry("420x220")
+        dialog.configure(bg="gray20")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text=f"SMPTE at {self._format_time(sm.get('t',0.0))}", bg="gray20", fg="white", font=("Arial", 10, "bold")).pack(pady=10)
+        form = tk.Frame(dialog, bg="gray20")
+        form.pack(pady=10, padx=20, fill=tk.BOTH)
+        tk.Label(form, text="Name:", bg="gray20", fg="white").grid(row=0, column=0, sticky="w", pady=5)
+        name_var = tk.StringVar(value=str(sm.get("name", "SMPTE")))
+        tk.Entry(form, textvariable=name_var, bg="gray40", fg="white", width=28).grid(row=0, column=1, pady=5, padx=10, sticky="w")
+        tk.Label(form, text="Duration (seconds):", bg="gray20", fg="white").grid(row=1, column=0, sticky="w", pady=5)
+        dur_var = tk.DoubleVar(value=float(sm.get("duration", 5.0)))
+        tk.Spinbox(form, from_=0.1, to=3600.0, increment=0.1, textvariable=dur_var, bg="gray40", fg="white", width=12).grid(row=1, column=1, pady=5, padx=10, sticky="w")
+        # Buttons
+        btn = tk.Frame(dialog, bg="gray20")
+        btn.pack(pady=12)
+        def save_changes():
+            try:
+                self._save_undo_state()
+                sm["name"] = name_var.get().strip() or "SMPTE"
+                sm["duration"] = float(dur_var.get())
+                self.waveform_cached = False
+                self._update_canvas_view()
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("SMPTE", f"Invalid values: {e}")
+        tk.Button(btn, text="Save", command=save_changes, bg="gray40", fg="white", width=10).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn, text="Cancel", command=lambda: dialog.destroy(), bg="gray40", fg="white", width=10).pack(side=tk.LEFT, padx=6)
+
+    def _delete_smpte_marker(self, idx):
+        try:
+            if 0 <= idx < len(self.smpte_markers):
+                self._save_undo_state()
+                self.smpte_markers.pop(idx)
+                self.selected_smpte_marker = None
+                self.waveform_cached = False
+                self._update_canvas_view()
+        except Exception:
+            pass
     
     def _edit_midi_marker(self):
         """Edit MIDI marker closest to playhead."""
@@ -5177,6 +5244,30 @@ class TimelineEditorGUI:
                     self.waveform_cached = False
                     self._update_canvas_view()
                     return
+
+        # Check if clicking on a SMPTE marker
+        if hasattr(self, 'smpte_marker_boxes') and self.smpte_marker_boxes:
+            for idx, (x1, y1, x2, y2) in self.smpte_marker_boxes.items():
+                if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
+                    # SMPTE marker clicked - select it (do not move playhead)
+                    self.selected_smpte_marker = idx
+                    try:
+                        marker_t = float(self.smpte_markers[idx].get("t", 0.0)) if self.smpte_markers[idx] else 0.0
+                    except Exception:
+                        marker_t = 0.0
+                    # Prepare for dragging horizontally
+                    self._smpte_drag_dt = (canvas_x / self.zoom_level) - marker_t
+                    self.drag_smpte_index = idx
+                    self._drag_smpte_ref = self.smpte_markers[idx]
+                    try:
+                        self.canvas.config(cursor="fleur")
+                    except Exception:
+                        pass
+                    self.selected_frame = None
+                    self.selected_session = None
+                    self.waveform_cached = False
+                    self._update_canvas_view()
+                    return
         
         # Check if clicking on a session box
         if self.timeline_data and getattr(self, "session_bounds", {}):
@@ -5238,6 +5329,13 @@ class TimelineEditorGUI:
                 if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
                     # Open editor without moving playhead
                     self._edit_osc_marker(idx)
+                    return
+
+        # Check if double-clicking on a SMPTE marker - open editor
+        if hasattr(self, 'smpte_marker_boxes') and self.smpte_marker_boxes:
+            for idx, (x1, y1, x2, y2) in self.smpte_marker_boxes.items():
+                if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
+                    self._edit_smpte_marker(idx)
                     return
         
         # Check if double-clicking on a session box (Art-Net session)
@@ -5348,7 +5446,7 @@ class TimelineEditorGUI:
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
-        # Context menu for markers (OSC/MIDI)
+        # Context menu for markers (OSC/MIDI/SMPTE)
         try:
             # Check OSC marker hit first
             if hasattr(self, 'osc_marker_boxes') and self.osc_marker_boxes:
@@ -5371,6 +5469,19 @@ class TimelineEditorGUI:
                         menu = tk.Menu(self.root, tearoff=0)
                         menu.add_command(label="Edit MIDI Marker", command=self._edit_midi_marker)
                         menu.add_command(label="Delete MIDI Marker", command=lambda: self._delete_selected_midi_marker())
+                        try:
+                            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+                        finally:
+                            menu.grab_release()
+                        return
+            # Check SMPTE marker hit
+            if hasattr(self, 'smpte_marker_boxes') and self.smpte_marker_boxes:
+                for idx, (x1, y1, x2, y2) in self.smpte_marker_boxes.items():
+                    if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
+                        self.selected_smpte_marker = idx
+                        menu = tk.Menu(self.root, tearoff=0)
+                        menu.add_command(label="Edit SMPTE Marker", command=lambda i=idx: self._edit_smpte_marker(i))
+                        menu.add_command(label="Delete SMPTE Marker", command=lambda i=idx: self._delete_smpte_marker(i))
                         try:
                             menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
                         finally:
@@ -6066,6 +6177,59 @@ class TimelineEditorGUI:
         
         # Draw MIDI markers section
         # Draw OSC markers section (above MIDI)
+        # Draw SMPTE markers section (above OSC)
+        if getattr(self, 'smpte_markers', []):
+            smpte_section_height = 60
+            # Place SMPTE above OSC/MIDI lanes
+            has_osc = bool(self.osc_markers)
+            has_midi = bool(self.midi_markers)
+            base_bottom_margin = 10
+            midi_h = 80 if has_midi else 0
+            osc_h = 80 if has_osc else 0
+            inter_gap = 20
+            smpte_section_bottom = canvas_height - (midi_h + osc_h + base_bottom_margin + (inter_gap if has_osc or has_midi else 0))
+            smpte_section_top = smpte_section_bottom - smpte_section_height
+            smpte_center = (smpte_section_top + smpte_section_bottom) / 2
+
+            left_padding = 14
+            self.canvas.create_rectangle(0, smpte_section_top, max_x, smpte_section_bottom,
+                                        fill="#0f0f0f", outline="#87cefa", width=2)
+            self.canvas.create_text(left_padding, smpte_section_top - 22, text="SMPTE",
+                                   fill="#87cefa", anchor="nw", font=("Arial", 9, "bold"))
+
+            self.smpte_marker_boxes = {}
+            for idx, sm in enumerate(self.smpte_markers):
+                marker_x = sm.get("t", 0.0) * self.zoom_level
+                name = sm.get("name", "SMPTE")
+                duration = float(sm.get("duration", 1.0))
+                duration_width = max(8, duration * self.zoom_level)
+                block_height = 18
+                is_selected = (self.selected_smpte_marker == idx)
+                outline_color = "white" if is_selected else "#87cefa"
+                fill_color = "#4682b4" if is_selected else "#2f4f4f"
+                self.canvas.create_rectangle(
+                    marker_x - 2, smpte_center - block_height,
+                    marker_x + duration_width, smpte_center + block_height,
+                    fill=fill_color, outline=outline_color, width=2 if is_selected else 1,
+                    tags=f"smpte_{idx}"
+                )
+                self.canvas.create_line(marker_x, smpte_section_top, marker_x, smpte_section_bottom,
+                                       fill="#87cefa", width=2, dash=(2, 2))
+                # Label
+                info = name
+                max_label_chars = 18
+                if len(info) > max_label_chars:
+                    info = info[:max_label_chars-1] + "…"
+                label_y = smpte_center - (block_height + 10)
+                self.canvas.create_text(marker_x, label_y, text=info,
+                                       fill="white", anchor="w", font=("Arial", 7, "bold"))
+                self.smpte_marker_boxes[idx] = (
+                    marker_x - 2, smpte_center - block_height,
+                    marker_x + duration_width, smpte_center + block_height
+                )
+        else:
+            self.smpte_marker_boxes = {}
+
         if self.osc_markers:
             osc_section_height = 80
             # Place OSC section just above MIDI section when MIDI exists, otherwise at bottom
