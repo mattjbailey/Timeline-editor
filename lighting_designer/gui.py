@@ -11709,10 +11709,11 @@ class FixtureSequenceTimeline(QFrame):
 
     marker_selected = pyqtSignal(int)
     marker_moved = pyqtSignal(int, float)
+    segment_toggled = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(130)
         self.setMouseTracking(True)
         self.duration = 4.0
         self.markers = []
@@ -11725,6 +11726,19 @@ class FixtureSequenceTimeline(QFrame):
         self.duration = max(0.1, float(duration))
         self.selected_row = selected_row
         self.update()
+
+    def _segment_badges(self):
+        """Yield (left_row, center_x, center_y, is_snap) for each segment
+        indicator drawn at the midpoint between adjacent markers."""
+        y = self.height() // 2
+        for row in range(len(self.markers) - 1):
+            left = self.markers[row]
+            right = self.markers[row + 1]
+            x1 = self._time_x(left.time)
+            x2 = self._time_x(right.time)
+            cx = (x1 + x2) / 2.0
+            is_snap = getattr(left, "segment_mode", "smooth") == "step"
+            yield row, cx, y, is_snap
 
     def _time_x(self, value):
         return 18 + (self.width() - 36) * max(0.0, min(1.0, value / self.duration))
@@ -11746,6 +11760,14 @@ class FixtureSequenceTimeline(QFrame):
         playhead_x = self._time_x(self.playhead_time)
         painter.setPen(QPen(QColor("#e6e6e6"), 2))
         painter.drawLine(int(playhead_x), 28, int(playhead_x), self.height() - 12)
+        # Draw a clickable interpolate/snap badge at each segment midpoint.
+        for row, cx, cy, is_snap in self._segment_badges():
+            box = QRectF(cx - 26, cy - 44, 52, 20)
+            painter.setBrush(QBrush(QColor("#8a5a2b") if is_snap else QColor("#2b5d8a")))
+            painter.setPen(QPen(QColor("#cccccc"), 1))
+            painter.drawRoundedRect(box, 5, 5)
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "SNAP" if is_snap else "FADE")
         for row, marker in enumerate(self.markers):
             x = self._time_x(marker.time)
             color = QColor("#f0a060" if row == self.selected_row else "#5da9e9")
@@ -11762,13 +11784,26 @@ class FixtureSequenceTimeline(QFrame):
         row = min(range(len(distances)), key=distances.__getitem__)
         return row if distances[row] <= 22 else -1
 
+    def _segment_at(self, x, y):
+        """Return the left-marker row whose segment badge was clicked, else -1."""
+        for row, cx, cy, _is_snap in self._segment_badges():
+            if abs(x - cx) <= 26 and (cy - 46) <= y <= (cy - 22):
+                return row
+        return -1
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_row = self._nearest_row(event.position().x())
+            x = event.position().x()
+            y = event.position().y()
+            segment_row = self._segment_at(x, y)
+            if segment_row >= 0:
+                self.segment_toggled.emit(segment_row)
+                return
+            self.drag_row = self._nearest_row(x)
             if self.drag_row >= 0:
                 self.marker_selected.emit(self.drag_row)
             else:
-                self.playhead_time = self._x_time(event.position().x())
+                self.playhead_time = self._x_time(x)
                 self.update()
 
     def mouseMoveEvent(self, event):
@@ -11783,14 +11818,31 @@ class FixtureSequenceTimeline(QFrame):
 class AuthoredFixtureSequenceDialog(QDialog):
     """Direct-authorship timeline editor; it never reads live DMX values."""
 
-    def __init__(self, parent, project: LightingProject, sequence: FixtureSequence | None = None):
+    def __init__(self, parent, project: LightingProject, sequence: FixtureSequence | None = None, window=None):
         super().__init__(parent)
         self.project = project
         self.sequence = sequence or FixtureSequence()
+        self.main_window = window
+        self.preview_player = None
         self.selected_row = -1
         self.channel_sliders = {}
+        self._live_saved = {}
+        self._claimed_channels = set()
+        # Stop any running effects/sequences so the editor opens on a clean rig.
+        if self.main_window is not None and hasattr(self.main_window, "_prepare_for_sequence_editing"):
+            try:
+                self.main_window._prepare_for_sequence_editing()
+            except Exception:
+                pass
         self.setWindowTitle("Fixture Effect Timeline")
         self.setMinimumSize(900, 620)
+        # Allow the operator to resize or maximize the editor to fill the screen.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
+        self.setSizeGripEnabled(True)
         self.setStyleSheet(DARK_STYLESHEET)
 
         root = QVBoxLayout(self)
@@ -11816,9 +11868,9 @@ class AuthoredFixtureSequenceDialog(QDialog):
             fixture_index = self.group_combo.findData(self.sequence.source_fixture_id)
             if fixture_index >= 0:
                 self.group_combo.setCurrentIndex(fixture_index)
-        top.addRow("Apply to group", self.group_combo)
+        top.addRow("Apply effect to", self.group_combo)
         self.source_combo = QComboBox()
-        top.addRow("Author using fixture", self.source_combo)
+        top.addRow("Author with this light", self.source_combo)
         self.duration_spin = QDoubleSpinBox()
         self.duration_spin.setRange(0.1, 3600.0)
         self.duration_spin.setDecimals(2)
@@ -11849,7 +11901,7 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.stagger_spin.setSingleStep(0.05)
         self.stagger_spin.setSuffix(" s")
         self.stagger_spin.setValue(max(0.0, self.sequence.stagger_seconds))
-        top.addRow("Per-fixture offset", self.stagger_spin)
+        top.addRow("Per-light offset (wave)", self.stagger_spin)
 
         self.loop_check = QCheckBox("Loop sequence")
         self.loop_check.setChecked(self.sequence.loop)
@@ -11860,12 +11912,98 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.loop_count_spin.setSpecialValueText("Infinite")
         self.loop_count_spin.setValue(max(0, self.sequence.loop_count))
         top.addRow("Loop count", self.loop_count_spin)
-        root.addLayout(top)
 
+        self.move_in_black_check = QCheckBox("Move to position before opening")
+        self.move_in_black_check.setChecked(getattr(self.sequence, "move_in_black", False))
+        top.addRow("Pre-position", self.move_in_black_check)
+
+        self.pre_position_spin = QDoubleSpinBox()
+        self.pre_position_spin.setRange(0.0, 10.0)
+        self.pre_position_spin.setDecimals(2)
+        self.pre_position_spin.setSingleStep(0.1)
+        self.pre_position_spin.setSuffix(" s")
+        self.pre_position_spin.setValue(max(0.0, getattr(self.sequence, "pre_position_seconds", 1.0)))
+        top.addRow("Pre-position time", self.pre_position_spin)
+        # Make numeric fields touch-friendly: big up/down arrows, no typing so
+        # the Windows on-screen keyboard does not pop up when tapping them.
+        from PyQt6.QtWidgets import QAbstractSpinBox
+        for _spin in (self.duration_spin, self.speed_spin, self.stagger_spin, self.loop_count_spin, self.pre_position_spin):
+            _spin.setMinimumWidth(150)
+            _spin.setMinimumHeight(32)
+            _spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+            _spin.lineEdit().setReadOnly(True)
+            _spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # ---- Split layout: settings (left) | marker parameters (right),
+        # with the timeline and marker controls spanning the bottom. ----
+        from PyQt6.QtWidgets import QSplitter, QButtonGroup
+
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addLayout(top)
+
+        # Persistent scope toggle shown as two clearly highlighted buttons so
+        # the selected option is obvious.
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("This effect plays on:"))
+        self.scope_fixture_radio = QPushButton("Single fixture")
+        self.scope_group_radio = QPushButton("Whole group (offset per light)")
+        for _btn in (self.scope_fixture_radio, self.scope_group_radio):
+            _btn.setCheckable(True)
+            _btn.setMinimumHeight(34)
+            _btn.setStyleSheet(
+                "QPushButton { background:#3a3a3a; color:#cccccc; border:1px solid #555;"
+                " border-radius:4px; padding:4px 10px; }"
+                "QPushButton:checked { background:#2d7d46; color:#ffffff;"
+                " border:2px solid #7CFC00; font-weight:bold; }"
+            )
+        self.scope_buttons = QButtonGroup(self)
+        self.scope_buttons.setExclusive(True)
+        self.scope_buttons.addButton(self.scope_fixture_radio)
+        self.scope_buttons.addButton(self.scope_group_radio)
+        if self.sequence.target_type == "group":
+            self.scope_group_radio.setChecked(True)
+        else:
+            self.scope_fixture_radio.setChecked(True)
+        self.scope_fixture_radio.toggled.connect(self._on_scope_changed)
+        scope_row.addWidget(self.scope_fixture_radio)
+        scope_row.addWidget(self.scope_group_radio)
+        scope_row.addStretch()
+        left_layout.addLayout(scope_row)
+        left_layout.addStretch()
+
+        # Right column: the selected marker's parameter sliders.
+        self.parameter_box = QGroupBox("Marker parameters")
+        box_layout = QVBoxLayout(self.parameter_box)
+        param_scroll = QScrollArea()
+        param_scroll.setWidgetResizable(True)
+        param_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        param_container = QWidget()
+        self.parameter_layout = QFormLayout(param_container)
+        param_scroll.setWidget(param_container)
+        box_layout.addWidget(param_scroll)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left_widget)
+        splitter.addWidget(self.parameter_box)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([470, 470])
+        root.addWidget(splitter, 1)
+
+        # ---- Bottom (full width): timeline + marker controls. ----
         self.timeline = FixtureSequenceTimeline()
         self.timeline.marker_selected.connect(self._select_marker)
         self.timeline.marker_moved.connect(self._move_marker)
+        self.timeline.segment_toggled.connect(self._toggle_segment_mode)
         root.addWidget(self.timeline)
+
+        hint = QLabel("Tip: click the FADE/SNAP badge on the line between two markers to "
+                     "toggle whether that segment fades or snaps. The loop back to the "
+                     "first marker never fades. Select a marker and press Delete to remove it.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        root.addWidget(hint)
 
         marker_bar = QHBoxLayout()
         add_button = QPushButton("Add Marker")
@@ -11878,6 +12016,9 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.marker_time_spin.setRange(0.0, 3600.0)
         self.marker_time_spin.setDecimals(2)
         self.marker_time_spin.setSuffix(" s")
+        self.marker_time_spin.setMinimumWidth(130)
+        self.marker_time_spin.setMinimumHeight(32)
+        self.marker_time_spin.lineEdit().setReadOnly(True)
         self.marker_time_spin.valueChanged.connect(self._time_field_changed)
         self.marker_name_edit = QLineEdit("Marker")
         self.marker_name_edit.setMaximumWidth(180)
@@ -11887,9 +12028,22 @@ class AuthoredFixtureSequenceDialog(QDialog):
         marker_bar.addStretch()
         root.addLayout(marker_bar)
 
-        self.parameter_box = QGroupBox("Marker parameters")
-        self.parameter_layout = QFormLayout(self.parameter_box)
-        root.addWidget(self.parameter_box, 1)
+        # Transport (play buttons) sit at the bottom, full width.
+        transport = QHBoxLayout()
+        self.play_fixture_button = QPushButton("▶ Play on Fixture")
+        self.play_fixture_button.setCheckable(True)
+        self.play_fixture_button.setMinimumHeight(36)
+        self.play_fixture_button.clicked.connect(lambda: self._toggle_preview(False))
+        self.play_group_button = QPushButton("▶ Play on Group")
+        self.play_group_button.setCheckable(True)
+        self.play_group_button.setMinimumHeight(36)
+        self.play_group_button.clicked.connect(lambda: self._toggle_preview(True))
+        self.preview_status = QLabel("")
+        transport.addWidget(self.play_fixture_button)
+        transport.addWidget(self.play_group_button)
+        transport.addWidget(self.preview_status)
+        transport.addStretch()
+        root.addLayout(transport)
 
         bottom = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         bottom.accepted.connect(self._save)
@@ -11899,11 +12053,16 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.group_combo.currentIndexChanged.connect(self._refresh_source_fixtures)
         self.source_combo.currentIndexChanged.connect(self._source_changed)
         self.duration_spin.valueChanged.connect(self._refresh_timeline)
+        # Preserve the sequence's real authoring fixture while the combos are
+        # populated: _source_changed must not overwrite it during load.
+        self._loading = True
         self._refresh_source_fixtures()
         if self.sequence.source_fixture_id:
             source_index = self.source_combo.findData(self.sequence.source_fixture_id)
             if source_index >= 0:
                 self.source_combo.setCurrentIndex(source_index)
+        self._loading = False
+        self._source_changed()
         self._refresh_timeline()
 
     def _group(self):
@@ -11937,7 +12096,9 @@ class AuthoredFixtureSequenceDialog(QDialog):
 
     def _source_changed(self):
         fixture = self._source_fixture()
-        if fixture:
+        # Never clobber the stored authoring fixture while the dialog is still
+        # populating its combos (that would orphan the markers' looks).
+        if fixture and not getattr(self, "_loading", False):
             self.sequence.source_fixture_id = fixture.id
             self.sequence.source_fixture_name = fixture.label or fixture.profile.full_name
         self._refresh_parameter_panel()
@@ -11951,6 +12112,7 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.timeline.set_state(self.sequence.sorted_markers(), self.sequence.duration, self.selected_row)
 
     def _refresh_parameter_panel(self):
+        self._restore_live_edit()
         while self.parameter_layout.count():
             item = self.parameter_layout.takeAt(0)
             if item.widget():
@@ -11963,17 +12125,140 @@ class AuthoredFixtureSequenceDialog(QDialog):
             return
         look = next((item for item in marker.looks if item.fixture_id == fixture.id), None)
         if not look:
-            marker.looks = [FixtureLook.from_dict(SequenceMarker.authored(marker.time, marker.name, fixture).looks[0].to_dict())]
+            template = SequenceMarker.authored(marker.time, marker.name, fixture).looks[0]
+            if marker.looks:
+                # The source fixture differs from what this marker was authored
+                # with: preserve the authored values by remapping them onto this
+                # fixture's channels by type instead of resetting to defaults.
+                target_types = [channel.type for channel in fixture.mode.channels]
+                mapped = map_values_by_type(marker.looks[0].values, target_types)
+                for idx, val in mapped.items():
+                    template.values[f"{idx}:{target_types[idx]}"] = int(val)
+            marker.looks = [template]
             look = marker.looks[0]
         for index, channel in enumerate(fixture.mode.channels):
             key = f"{index}:{channel.type}"
+            initial = int(look.values.get(key, getattr(channel, "default", 0)))
             slider = QSlider(Qt.Orientation.Horizontal)
             slider.setRange(0, 255)
-            slider.setValue(int(look.values.get(key, getattr(channel, "default", 0))))
-            slider.valueChanged.connect(lambda value, k=key, l=look: l.values.__setitem__(k, int(value)))
+            slider.setValue(initial)
+            # Editable text box so a precise value can be typed; kept in sync.
+            from PyQt6.QtGui import QIntValidator
+            value_edit = QLineEdit(str(initial))
+            value_edit.setValidator(QIntValidator(0, 255, self))
+            value_edit.setMaximumWidth(56)
+            value_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+            slider.valueChanged.connect(
+                lambda value, k=key, l=look, e=value_edit: self._on_param_slider_changed(k, l, value, e)
+            )
+            value_edit.editingFinished.connect(
+                lambda s=slider, e=value_edit: self._on_param_text_entered(s, e)
+            )
             self.channel_sliders[key] = slider
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(slider, 1)
+            row_layout.addWidget(value_edit)
             label = QLabel(f"{channel.name} ({channel.type})")
-            self.parameter_layout.addRow(label, slider)
+            self.parameter_layout.addRow(label, row_widget)
+        # Apply the selected marker's authored look live so the edited light
+        # reflects the current settings the moment it is selected.
+        self._apply_live_edit(look)
+
+    def _on_param_slider_changed(self, key, look, value, value_edit=None):
+        look.values[key] = int(value)
+        if value_edit is not None and value_edit.text() != str(int(value)):
+            value_edit.blockSignals(True)
+            value_edit.setText(str(int(value)))
+            value_edit.blockSignals(False)
+        self._apply_live_edit(look)
+
+    def _on_param_text_entered(self, slider, value_edit):
+        try:
+            value = max(0, min(255, int(value_edit.text() or 0)))
+        except ValueError:
+            value = slider.value()
+        value_edit.setText(str(value))
+        slider.setValue(value)  # drives _on_param_slider_changed
+
+    def _apply_live_edit(self, look):
+        """Write the source fixture's authored look live to the rig so the
+        light being edited responds instantly. Applies only to the selected
+        light, never the group."""
+        if self.preview_player is not None:
+            return
+        if self.main_window is None or not hasattr(self.main_window, "artnet"):
+            return
+        fixture = self._source_fixture()
+        if fixture is None:
+            return
+        # Claim the channels so the effect engine's continuous output stops
+        # fighting these writes (otherwise the dimmer flickers on/off).
+        self._claim_channels([fixture])
+        channel_count = len(fixture.mode.channels)
+        for key, value in look.values.items():
+            try:
+                index = int(key.split(":", 1)[0])
+            except (ValueError, IndexError):
+                continue
+            if index >= channel_count:
+                continue
+            addr = fixture.address + index
+            slot = (fixture.universe, addr)
+            if slot not in self._live_saved:
+                try:
+                    self._live_saved[slot] = self.main_window.artnet.get_channel(fixture.universe, addr)
+                except Exception:
+                    self._live_saved[slot] = 0
+            try:
+                self.main_window.artnet.set_channel(fixture.universe, addr, int(value))
+            except Exception:
+                pass
+
+    def _claim_channels(self, fixtures):
+        """Register the given fixtures' channels with the effect engine so it
+        skips them and does not overwrite live preview output."""
+        if self.main_window is None:
+            return
+        engine = getattr(self.main_window, "effect_engine", None)
+        if engine is None:
+            return
+        claimed = set()
+        for fixture in fixtures:
+            for index in range(len(fixture.mode.channels)):
+                addr = fixture.address + index
+                if 1 <= addr <= 512:
+                    claimed.add((fixture.universe, addr))
+        if not claimed:
+            return
+        self._claimed_channels |= claimed
+        if not hasattr(self.main_window, "_preview_claimed_channels"):
+            self.main_window._preview_claimed_channels = set()
+        self.main_window._preview_claimed_channels |= claimed
+        engine._fixture_control_channels = self.main_window._preview_claimed_channels
+
+    def _release_claimed_channels(self):
+        if self._claimed_channels and self.main_window is not None:
+            pcc = getattr(self.main_window, "_preview_claimed_channels", None)
+            if pcc is not None:
+                pcc -= self._claimed_channels
+                engine = getattr(self.main_window, "effect_engine", None)
+                if engine is not None:
+                    engine._fixture_control_channels = pcc
+        self._claimed_channels = set()
+
+    def _restore_live_edit(self):
+        self._release_claimed_channels()
+        if not self._live_saved:
+            return
+        if self.main_window is not None and hasattr(self.main_window, "artnet"):
+            for (universe, addr), value in self._live_saved.items():
+                try:
+                    self.main_window.artnet.set_channel(universe, addr, int(value))
+                except Exception:
+                    pass
+        self._live_saved.clear()
 
     def _select_marker(self, row):
         self.selected_row = row
@@ -11992,6 +12277,14 @@ class AuthoredFixtureSequenceDialog(QDialog):
             markers[row].time = round(value, 2)
             self.selected_row = row
             self._select_marker(row)
+
+    def _toggle_segment_mode(self, left_row):
+        """Flip the segment leaving marker `left_row` between fade and snap."""
+        markers = self.sequence.sorted_markers()
+        if 0 <= left_row < len(markers):
+            current = getattr(markers[left_row], "segment_mode", "smooth")
+            markers[left_row].segment_mode = "step" if current != "step" else "smooth"
+            self._refresh_timeline()
 
     def _time_field_changed(self, value):
         marker = self._current_marker()
@@ -12035,14 +12328,27 @@ class AuthoredFixtureSequenceDialog(QDialog):
             self._refresh_parameter_panel()
             self._refresh_timeline()
 
-    def _save(self):
+    def keyPressEvent(self, event):
+        # Delete/Backspace removes the selected marker unless a text field or
+        # spin box has focus (so typing still works there).
+        from PyQt6.QtWidgets import QLineEdit, QAbstractSpinBox
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            focus = self.focusWidget()
+            if not isinstance(focus, (QLineEdit, QAbstractSpinBox)) and self._current_marker():
+                self._delete_marker()
+                return
+        super().keyPressEvent(event)
+
+    def _apply_ui_to_sequence(self) -> bool:
         name = self.name_edit.text().strip()
+        if not name:
+            return False
         target_kind = self.group_combo.currentData(Qt.ItemDataRole.UserRole + 1)
-        if not name or target_kind not in {"group", "fixture"}:
-            QMessageBox.warning(self, "Incomplete sequence", "Enter a name and select a fixture or group.")
-            return
+        # The scope radios decide whether the saved effect fires on the whole
+        # group or just the authoring light.
+        plays_on_group = self.scope_group_radio.isChecked()
         self.sequence.name = name
-        self.sequence.target_type = target_kind
+        self.sequence.target_type = "group" if plays_on_group else "fixture"
         self.sequence.group_id = self.group_combo.currentData() if target_kind == "group" else ""
         self.sequence.group_name = self.group_combo.currentText()
         self.sequence.duration = self.duration_spin.value()
@@ -12051,6 +12357,106 @@ class AuthoredFixtureSequenceDialog(QDialog):
         self.sequence.stagger_seconds = self.stagger_spin.value()
         self.sequence.loop = self.loop_check.isChecked()
         self.sequence.loop_count = self.loop_count_spin.value()
+        self.sequence.move_in_black = self.move_in_black_check.isChecked()
+        self.sequence.pre_position_seconds = self.pre_position_spin.value()
+        return True
+
+    def _on_scope_changed(self, _checked=False):
+        # Restart an in-progress preview so the new scope takes effect.
+        if self.preview_player is not None:
+            group = self.scope_group_radio.isChecked()
+            self._stop_preview()
+            self._toggle_preview(group)
+
+    def _toggle_preview(self, on_group: bool):
+        # Clicking the active button stops; clicking the other switches scope.
+        if self.preview_player is not None:
+            was_group = not getattr(self.preview_player, "source_only", True)
+            self._stop_preview()
+            if was_group == on_group:
+                return
+        if self.main_window is None or not hasattr(self.main_window, "artnet"):
+            QMessageBox.warning(self, "Preview unavailable", "No live output is connected for preview.")
+            self._reset_play_buttons()
+            return
+        if not self._apply_ui_to_sequence():
+            QMessageBox.warning(self, "Incomplete sequence", "Enter a name and select a fixture or group.")
+            self._reset_play_buttons()
+            return
+        if on_group and not self.sequence.group_id:
+            QMessageBox.warning(self, "No group selected",
+                                "Choose a group in 'Apply effect to' to play on the whole group.")
+            self._reset_play_buttons()
+            return
+        if not self.sequence.markers:
+            QMessageBox.warning(self, "No markers", "Add at least one marker before previewing.")
+            self._reset_play_buttons()
+            return
+        self._restore_live_edit()
+        player = FixtureSequencePlayer(self.main_window, self.sequence)
+        player.source_only = not on_group
+        player.finished_callback = self._preview_finished
+        player.tick_callback = self._preview_tick
+        if not player.start():
+            QMessageBox.warning(self, "Preview failed", "Could not resolve the source fixture or targets.")
+            self._reset_play_buttons()
+            return
+        self.preview_player = player
+        button = self.play_group_button if on_group else self.play_fixture_button
+        other = self.play_fixture_button if on_group else self.play_group_button
+        button.setChecked(True)
+        button.setText("⏹ Stop")
+        other.setChecked(False)
+        other.setEnabled(False)  # only one scope can run at a time
+        self.preview_status.setText("Playing on group…" if on_group else "Playing on fixture…")
+
+    def _reset_play_buttons(self):
+        self.play_fixture_button.setChecked(False)
+        self.play_fixture_button.setEnabled(True)
+        self.play_fixture_button.setText("▶ Play on Fixture")
+        self.play_group_button.setChecked(False)
+        self.play_group_button.setEnabled(True)
+        self.play_group_button.setText("▶ Play on Group")
+
+    def _preview_tick(self, elapsed: float):
+        local_time = self.sequence.marker_time(elapsed)
+        self.timeline.playhead_time = local_time
+        self.timeline.update()
+
+    def _preview_finished(self):
+        self._stop_preview()
+
+    def _stop_preview(self):
+        if self.preview_player is not None:
+            self.preview_player.stop(restore=True)
+            self.preview_player = None
+        self._reset_play_buttons()
+        self.preview_status.setText("")
+        # Re-apply the current marker's authored look so the edited light
+        # keeps showing the settings after playback stops.
+        marker = self._current_marker()
+        fixture = self._source_fixture()
+        if marker and fixture:
+            look = next((item for item in marker.looks if item.fixture_id == fixture.id), None)
+            if look:
+                self._apply_live_edit(look)
+
+    def closeEvent(self, event):
+        self._stop_preview()
+        self._restore_live_edit()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._stop_preview()
+        self._restore_live_edit()
+        super().reject()
+
+    def _save(self):
+        if not self._apply_ui_to_sequence():
+            QMessageBox.warning(self, "Incomplete sequence", "Enter a name and select a fixture or group.")
+            return
+        self._stop_preview()
+        self._restore_live_edit()
         self.accept()
 
 
@@ -12063,26 +12469,44 @@ class FixtureSequencePlayer(QObject):
 
     def __init__(self, window, sequence: FixtureSequence):
         super().__init__(window)
-        self.window = window
+        self.main_window = window
         self.sequence = sequence
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self._tick)
         self._start_time = 0.0
+        # Sequence-time accumulator so the live master speed can scale playback
+        # smoothly (per-tick delta * current master) without time jumps.
+        self._seq_elapsed = 0.0
+        self._last_tick = 0.0
         self._targets = []
         self._source_channel_types = []
         self._saved = {}
+        self.finished_callback = None
+        self.tick_callback = None
+        self.source_only = False
+        self._claimed = set()
+        # Move-in-black: hold the light dark at its start position for a moment
+        # so the head can swing into place before the beam appears.
+        self._prepositioning = False
+        self._prepos_end = 0.0
+
+    _DARK_TYPES = {
+        "dimmer", "intensity", "shutter", "strobe", "master", "master dimmer",
+    }
 
     def start(self) -> bool:
         import time
-        project = self.window.project
+        project = self.main_window.project
         seq = self.sequence
         source = project.get_fixture_by_id(seq.source_fixture_id)
         if source is None or not seq.markers:
             return False
         self._source_channel_types = [channel.type for channel in source.mode.channels]
 
-        if seq.target_type == "group":
+        if self.source_only:
+            self._targets = [source]
+        elif seq.target_type == "group":
             group = project.get_group_by_id(seq.group_id)
             members = []
             if group:
@@ -12093,6 +12517,12 @@ class FixtureSequencePlayer(QObject):
             ordered_ids = seq.ordered_fixture_ids(members)
             id_map = {fixture.id: fixture for fixture in members}
             self._targets = [id_map[fid] for fid in ordered_ids if fid in id_map]
+            # Lead the wave with the authored source fixture so "Play on Group"
+            # starts in sync with "Play on Fixture" (first light on time, the
+            # rest follow with the per-light offset).
+            if source in self._targets:
+                self._targets.remove(source)
+                self._targets.insert(0, source)
         else:
             self._targets = [source]
         if not self._targets:
@@ -12102,40 +12532,121 @@ class FixtureSequencePlayer(QObject):
             for index in range(len(fixture.mode.channels)):
                 addr = fixture.address + index
                 try:
-                    self._saved[(fixture.universe, addr)] = self.window.artnet.get_channel(
+                    self._saved[(fixture.universe, addr)] = self.main_window.artnet.get_channel(
                         fixture.universe, addr
                     )
                 except Exception:
                     self._saved[(fixture.universe, addr)] = 0
 
+        self._claim_channels()
         self._start_time = time.monotonic()
+        self._last_tick = self._start_time
+        self._seq_elapsed = 0.0
+        self._prepositioning = bool(
+            getattr(seq, "move_in_black", False)
+            and getattr(seq, "pre_position_seconds", 0.0) > 0.0
+        )
+        self._prepos_end = self._start_time + float(getattr(seq, "pre_position_seconds", 0.0))
         self.timer.start()
         self._tick()
         return True
 
+    def _claim_channels(self):
+        """Register target channels with the effect engine so its continuous
+        output does not overwrite (flicker/kill) the preview."""
+        engine = getattr(self.main_window, "effect_engine", None)
+        if engine is None:
+            return
+        claimed = set()
+        for fixture in self._targets:
+            for index in range(len(fixture.mode.channels)):
+                addr = fixture.address + index
+                if 1 <= addr <= 512:
+                    claimed.add((fixture.universe, addr))
+        self._claimed = claimed
+        if not claimed:
+            return
+        if not hasattr(self.main_window, "_preview_claimed_channels"):
+            self.main_window._preview_claimed_channels = set()
+        self.main_window._preview_claimed_channels |= claimed
+        engine._fixture_control_channels = self.main_window._preview_claimed_channels
+
+    def _release_channels(self):
+        engine = getattr(self.main_window, "effect_engine", None)
+        if self._claimed:
+            pcc = getattr(self.main_window, "_preview_claimed_channels", None)
+            if pcc is not None:
+                pcc -= self._claimed
+                if engine is not None:
+                    engine._fixture_control_channels = pcc
+        self._claimed = set()
+
     def stop(self, restore: bool = True):
         self.timer.stop()
+        self._release_channels()
         if restore:
             for (universe, addr), value in self._saved.items():
                 try:
-                    self.window.artnet.set_channel(universe, addr, int(value))
+                    self.main_window.artnet.set_channel(universe, addr, int(value))
                 except Exception:
                     pass
         self._saved.clear()
 
+    def _apply_preposition(self):
+        """Send each target's start position while forcing the beam dark."""
+        seq = self.sequence
+        markers = seq.sorted_markers()
+        if not markers or not markers[0].looks:
+            return
+        start_values = dict(markers[0].looks[0].values)
+        for fixture in self._targets:
+            target_types = [channel.type for channel in fixture.mode.channels]
+            mapped = map_values_by_type(start_values, target_types)
+            for target_index, value in mapped.items():
+                ttype = target_types[target_index].lower() if target_index < len(target_types) else ""
+                out = 0 if ttype in self._DARK_TYPES else value
+                try:
+                    self.main_window.artnet.set_channel(
+                        fixture.universe, fixture.address + target_index, out
+                    )
+                except Exception:
+                    pass
+
     def _tick(self):
         import time
         seq = self.sequence
-        elapsed = time.monotonic() - self._start_time
+        now = time.monotonic()
+        # Move-in-black: hold every target at its start position with the beam
+        # closed until the pre-position time elapses, then run normally.
+        if self._prepositioning:
+            if now < self._prepos_end:
+                self._apply_preposition()
+                self._last_tick = now
+                return
+            self._prepositioning = False
+            self._last_tick = now
+        # Scale elapsed sequence time by the main-screen master speed so the
+        # timeline effect speeds up/slows down live with the master fader.
+        master = 1.0
+        engine = getattr(self.main_window, "effect_engine", None)
+        if engine is not None:
+            master = max(0.01, float(getattr(engine, "global_speed_multiplier", 1.0) or 1.0))
+        self._seq_elapsed += max(0.0, now - self._last_tick) * master
+        self._last_tick = now
+        elapsed = self._seq_elapsed
         count = len(self._targets)
         duration = seq.effective_duration()
         all_done = True
         for index, fixture in enumerate(self._targets):
             member_elapsed = elapsed - seq.fixture_start_offset(index, count)
             if member_elapsed < 0.0:
+                # Wave-offset members haven't started yet: pin them to the
+                # sequence's start look instead of leaving them frozen at their
+                # pre-playback DMX (which made the first pass look wrong until
+                # the offset cleared on the second loop).
                 all_done = False
-                continue
-            if seq.loop or member_elapsed < duration:
+                member_elapsed = 0.0
+            elif seq.loop or member_elapsed < duration:
                 all_done = False
             local_time = seq.marker_time(member_elapsed)
             source_values = evaluate_look(seq, local_time)
@@ -12143,13 +12654,18 @@ class FixtureSequencePlayer(QObject):
             mapped = map_values_by_type(source_values, target_types)
             for target_index, value in mapped.items():
                 try:
-                    self.window.artnet.set_channel(
+                    self.main_window.artnet.set_channel(
                         fixture.universe, fixture.address + target_index, value
                     )
                 except Exception:
                     pass
+        if self.tick_callback:
+            self.tick_callback(elapsed)
         if not seq.loop and all_done:
-            self.window._stop_fixture_sequence(seq.id, restore=True)
+            if self.finished_callback:
+                self.finished_callback()
+            else:
+                self.main_window._stop_fixture_sequence(seq.id, restore=True)
 
 
 class LightingDesignerWindow(QMainWindow):
@@ -36015,8 +36531,9 @@ class LightingDesignerWindow(QMainWindow):
             if is_main:
                 self.fixture_sequence_buttons = {}
             for sequence in self.project.fixture_sequences:
+                seq_running = sequence.id in getattr(self, '_active_sequence_players', {})
                 sequence_btn = create_tile_button(
-                    f"SEQ\n{sequence.name}", "#4a6a8a", False,
+                    f"SEQ\n{sequence.name}", "#4a6a8a", seq_running,
                     btn_preset_id=f"sequence:{sequence.id}"
                 )
                 sequence_btn.setToolTip(
@@ -36025,7 +36542,7 @@ class LightingDesignerWindow(QMainWindow):
                     f"Click to play / stop  ·  Right-click to edit"
                 )
                 sequence_btn.setCheckable(True)
-                if sequence.id in getattr(self, '_active_sequence_players', {}):
+                if seq_running:
                     sequence_btn.setChecked(True)
                 sequence_btn.clicked.connect(
                     lambda checked=False, sid=sequence.id: self._toggle_fixture_sequence(sid)
@@ -36132,7 +36649,7 @@ class LightingDesignerWindow(QMainWindow):
             )
             return
         sequence = FixtureSequence()
-        dialog = AuthoredFixtureSequenceDialog(self._get_active_window(), self.project, sequence)
+        dialog = AuthoredFixtureSequenceDialog(self._get_active_window(), self.project, sequence, window=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.project.fixture_sequences.append(sequence)
@@ -36147,7 +36664,7 @@ class LightingDesignerWindow(QMainWindow):
         )
         if not sequence:
             return
-        dialog = AuthoredFixtureSequenceDialog(self._get_active_window(), self.project, sequence)
+        dialog = AuthoredFixtureSequenceDialog(self._get_active_window(), self.project, sequence, window=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._mark_dirty()
             self._refresh_all_execute_tabs()
@@ -36244,11 +36761,40 @@ class LightingDesignerWindow(QMainWindow):
         player.stop(restore=restore)
         self._update_sequence_button_state(sequence_id, False)
 
+    def _stop_all_fixture_sequences(self, restore: bool = True):
+        """Stop every running fixture sequence."""
+        players = getattr(self, '_active_sequence_players', None)
+        if not players:
+            return
+        for sequence_id in list(players.keys()):
+            self._stop_fixture_sequence(sequence_id, restore=restore)
+
+    def _prepare_for_sequence_editing(self):
+        """Stop any running fixture sequences and effects so the timeline
+        editor opens on a clean rig and preview is not fought."""
+        self._stop_all_fixture_sequences(restore=True)
+        try:
+            engine = getattr(self, 'effect_engine', None)
+            if engine is not None and getattr(engine, '_active_effects', None):
+                engine.stop_all_effects_htp(blackout=False, go_home=False)
+        except Exception:
+            pass
+
     def _update_sequence_button_state(self, sequence_id: str, playing: bool):
         """Reflect play state on the sequence tile if it is visible."""
+        import re as _re
         button = getattr(self, 'fixture_sequence_buttons', {}).get(sequence_id)
-        if button is not None:
-            button.setChecked(playing)
+        if button is None:
+            return
+        button.setChecked(playing)
+        # The tile stylesheet has no :checked rule, so repaint the border
+        # directly to keep running sequences highlighted (green).
+        ss = button.styleSheet()
+        if playing:
+            ss = _re.sub(r'border:[^;]+;', 'border: 3px solid #00ff00;', ss, count=1)
+        else:
+            ss = _re.sub(r'border:[^;]+;', 'border: 1px solid #4d4d4d;', ss, count=1)
+        button.setStyleSheet(ss)
 
     def _exec_toggle_select(self, preset_id: str):
         """Toggle a preset in the multi-select set and update its border."""
@@ -37955,6 +38501,9 @@ class LightingDesignerWindow(QMainWindow):
         self.effect_engine._execute_mode = False
         self.effect_engine.stop_effect(blackout=True, send_home=False)
         self._current_effect = None
+
+        # Stop any running fixture timeline sequences too.
+        self._stop_all_fixture_sequences(restore=True)
         
         # Update selection state on execute buttons to show OFF
         self._update_execute_button_selection("__OFF__")
@@ -39100,6 +39649,14 @@ class LightingDesignerWindow(QMainWindow):
                             cue_name = cl.name
                             break
                     effect_display.setText(f"\U0001f3ac {cue_name}")
+                elif assigned_preset_id.startswith("sequence:"):
+                    sid = assigned_preset_id.split(":", 1)[1]
+                    seq_name = "Timeline"
+                    for s in self.project.fixture_sequences:
+                        if s.id == sid:
+                            seq_name = s.name
+                            break
+                    effect_display.setText(f"\U0001f3ac {seq_name}")
                 else:
                     preset_name = "Unknown"
                     for preset in self.project.presets:
@@ -39530,6 +40087,15 @@ class LightingDesignerWindow(QMainWindow):
             current_label = QLabel(f"Currently: Cue List - {current_cuelist.name}")
             current_label.setStyleSheet("color: #c9c050; font-size: 12px;")
             layout.addWidget(current_label)
+        elif current_assignment and str(current_assignment).startswith('sequence:'):
+            seq_id = str(current_assignment).split(':', 1)[1]
+            seq_name = next(
+                (s.name for s in self.project.fixture_sequences if s.id == seq_id),
+                "Unknown",
+            )
+            current_label = QLabel(f"Currently: Timeline - {seq_name}")
+            current_label.setStyleSheet("color: #4a9a8a; font-size: 12px;")
+            layout.addWidget(current_label)
         elif current_assignment:
             if current_assignment == "__OFF__":
                 current_name = "OFF"
@@ -39601,6 +40167,12 @@ class LightingDesignerWindow(QMainWindow):
             effects_list.addItem(item_text)
             item = effects_list.item(effects_list.count() - 1)
             item.setData(Qt.ItemDataRole.UserRole, effect.id)
+
+        # Add timeline fixture sequences so they can drive a fader too
+        for sequence in sorted(self.project.fixture_sequences, key=lambda s: s.name.lower()):
+            effects_list.addItem(f"🎬 {sequence.name} (Timeline)")
+            item = effects_list.item(effects_list.count() - 1)
+            item.setData(Qt.ItemDataRole.UserRole, f"sequence:{sequence.id}")
         
         # Wire up search filtering for effects
         def _filter_large_effects(text):
@@ -39947,6 +40519,12 @@ class LightingDesignerWindow(QMainWindow):
                 # Update display
                 if preset_id == "__OFF__":
                     display_label.setText("OFF")
+                elif str(preset_id).startswith("sequence:"):
+                    sid = str(preset_id).split(":", 1)[1]
+                    for s in self.project.fixture_sequences:
+                        if s.id == sid:
+                            display_label.setText(s.name)
+                            break
                 else:
                     for preset in self.project.presets:
                         if preset.id == preset_id:
@@ -45478,6 +46056,25 @@ class LightingDesignerWindow(QMainWindow):
             finally:
                 self._syncing_fader = False
 
+    def _handle_sequence_fader(self, fader_id: str, sequence_id: str, value: int):
+        """Raise the fader to play a timeline fixture sequence, lower it to stop."""
+        threshold = 2
+        if not hasattr(self, '_fader_exec_states'):
+            self._fader_exec_states = {}
+        state = self._fader_exec_states.setdefault(
+            fader_id, {'active': False, 'last_value': 0, 'preset_id': f'sequence:{sequence_id}'}
+        )
+        running = sequence_id in getattr(self, '_active_sequence_players', {})
+        if value > threshold and not state['active']:
+            if not running:
+                self._toggle_fixture_sequence(sequence_id)
+            state['active'] = True
+        elif value <= threshold and state['active']:
+            if running:
+                self._stop_fixture_sequence(sequence_id, restore=True)
+            state['active'] = False
+        state['last_value'] = value
+
     def _handle_fader_execution_control(self, fader_id: str, preset_id: str, value: int):
         """Handle fader-based execution control with HTP blending.
         
@@ -45494,6 +46091,12 @@ class LightingDesignerWindow(QMainWindow):
         if preset_id.startswith("cuelist:"):
             cuelist_id = preset_id.split(":", 1)[1]
             self._handle_cuelist_fader(fader_id, cuelist_id, value)
+            return
+
+        # ── Fixture sequence (timeline) fader: raise to play, lower to stop ──
+        if preset_id.startswith("sequence:"):
+            sequence_id = preset_id.split(":", 1)[1]
+            self._handle_sequence_fader(fader_id, sequence_id, value)
             return
 
         # Release overlay channel claims when a fader starts driving an effect
@@ -54916,7 +55519,7 @@ class LightingDesignerWindow(QMainWindow):
 
         video_items = [
             it for it in viz_data.get('items', [])
-            if it.get('source_type') == 'video' and it.get('video_path')
+            if it.get('source_type') in ('video', 'audio') and it.get('video_path')
         ]
         video_files = {}
         for it in video_items:
@@ -55032,7 +55635,7 @@ class LightingDesignerWindow(QMainWindow):
         QMessageBox.information(
             self, "Export Complete",
             f"Project bundle exported to:\n{bundle_dir}\n\n"
-            f"Included {n_videos} video file{'s' if n_videos != 1 else ''} "
+            f"Included {n_videos} media file{'s' if n_videos != 1 else ''} "
             f"and {n_settings} show setting{'s' if n_settings != 1 else ''}.\n"
             f"Copy the entire '{bundle_name}_Bundle' folder to another computer "
             f"and open the .lighting file from there."
