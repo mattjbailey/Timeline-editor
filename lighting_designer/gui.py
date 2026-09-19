@@ -48846,6 +48846,24 @@ class LightingDesignerWindow(QMainWindow):
         self.setWindowTitle(base)
     
     def _on_tab_changed(self, index: int):
+        """Guard wrapper around the tab-change handler.
+
+        Ensures no exception escapes back into Qt's event dispatch.  In
+        particular, when ``currentChanged`` fires while the QTabWidget (or a
+        child widget) C++ object is being torn down or rebuilt, PyQt raises
+        ``RuntimeError: wrapped C/C++ object ... has been deleted``.  If that
+        propagated out of the slot, Qt reports it as the opaque
+        ``SystemError: ... returned a result with an exception set`` and event
+        handling can break.  We swallow it here instead.
+        """
+        try:
+            self._on_tab_changed_impl(index)
+        except RuntimeError as exc:
+            logger.debug(f"_on_tab_changed ignored deleted-object error: {exc}")
+        except Exception:
+            logger.exception("_on_tab_changed failed")
+
+    def _on_tab_changed_impl(self, index: int):
         """Handle tab changes - refresh data as needed."""
         tab_name = self.tabs.tabText(index)
         logger.debug(f"_on_tab_changed: tab_name={tab_name}")
