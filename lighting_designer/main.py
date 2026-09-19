@@ -534,6 +534,22 @@ def main():
     # them for diagnosis.
     _start_cffi_log_forwarder()
 
+    # Wire the visualizer engine's error hook so audio/stream errors it catches
+    # (e.g. "audio_stream_open_retry" after stale-PortAudio recovery) are
+    # forwarded to Appertini.  Without this the hook stays None and those
+    # errors only land in ~/viz_debug.log.
+    def _viz_error_reporter(exc_type, exc_value, exc_tb, *, context="visualizer"):
+        _report_to_appertini(exc_type, exc_value, exc_tb, action=f"viz_{context}")
+
+    try:
+        try:
+            import visualizer_engine as _viz_mod
+        except ImportError:
+            from lighting_designer import visualizer_engine as _viz_mod
+        _viz_mod._error_reporter = _viz_error_reporter
+    except Exception:
+        pass
+
     # Record session start time for usage logging
     import time as _time
     _session_start = _time.time()
